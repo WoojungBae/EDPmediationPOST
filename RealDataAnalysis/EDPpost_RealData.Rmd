@@ -1,0 +1,1629 @@
+---
+title: "Rural LITE data"
+output:
+  html_notebook: default
+---
+
+# DATA 
+```{r}
+# Load R packages
+library(Rcpp)
+library(RcppArmadillo)
+library(dplyr)
+library(mgcv)
+library(openxlsx) 
+library(lme4) 
+library(triangle)
+
+# Set Directory
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediationpost/RealDataAnalysis")
+# setwd("C:/Users/Jennifer/Desktop/EDPmediation/RealDataAnalysis")
+
+# -------------------------------------------------------------------------
+# ---------------------------------- DATA ---------------------------------
+# -------------------------------------------------------------------------
+# Here are the details for this analysis:
+# - outcome: 24 month weight change (spreadsheet 2)
+# - mediator - Phase 2 attendance (measured as a percentage) - spreadsheet 1
+# - baseline confounders - mostly Table 1 from the paper and previous spreadsheet I sent
+# - potential post treatment confounder - 6 month weight (or 6 month weight change) - spreadsheet 4
+# - ok to merge control/low and moderate/high arms (so only two arms)
+
+# Load Data
+data1 = read.xlsx('RL_WTS_24mo_MD.xlsx', sheet = 'wts24', startRow = 2)
+# data1$ID
+# data1$CONDITION
+# data1$TRTARM
+# data1$WTKG_24
+
+# no edu+income data here
+data2 = read.xlsx('final_baseline_data_RL.xlsx')
+# data2$ID
+# data2$CONDITION
+# data2$TRTARM
+# data2$sex
+# data2$race
+# data2$AGE_WK1
+# data2$HTSV1
+# data2$WTKG_SV2
+# data2$BMI_SV2
+
+data3 = read.xlsx('tx data att - 082413 - all summary vars.xlsx')
+# data3$ID
+# data3$CONDITION
+# data3$TRTARM
+# data3$p2_attmu_tot_pc
+
+# 
+data4 = read.xlsx('RLITE_LABS_WTS.xlsx', sheet = 'WTS_0')
+# data4$ID
+# data4$CONDITION
+# data4$TRTARM
+# data4$WTKG_0
+
+# 
+data5 = read.xlsx('RLITE_LABS_WTS.xlsx', sheet = 'WTS_6')
+# data5$ID
+# data5$CONDITION
+# data5$TRTARM
+# data5$WTKG_6
+
+# 
+data6 = read.xlsx('RLITE_LABS_WTS.xlsx', sheet = 'WTS_24')
+# data6$ID
+# data6$CONDITION
+# data6$TRTARM
+# data6$WTKG_24
+
+# - mediator - Phase 2 attendance (measured as a percentage) - spreadsheet 1
+# - baseline confounders - mostly Table 1 from the paper and previous spreadsheet I sent
+sum(abs(data2$ID!=data3$ID))
+sum(abs(data2$ID!=data4$ID))
+sum(abs(data2$ID!=data5$ID))
+sum(abs(data2$ID!=data6$ID))
+
+# we may add education and income 
+# Just ignore the warning message! 
+LITEdata = data.frame(id = data6$ID, 
+                      cond = data6$CONDITION,
+                      trt = as.numeric(data6$TRTARM),
+                      wgt24 = as.numeric(data6$WTKG_24), 
+                      wgt6 = as.numeric(data5$WTKG_6), 
+                      wgt0 = as.numeric(data4$WTKG_0),
+                      att = as.numeric(data3$p2_attmu_tot_pc), 
+                      sex = as.numeric(data2$sex), 
+                      race = as.numeric(data2$nih_race_BIQ), # white no not
+                      age = as.numeric(data2$AGE_WK1), 
+                      bmi = as.numeric(data2$BMI_SV2))
+LITEdata$race[-which((LITEdata$race == 4 | LITEdata$race==5)==1)] = NA
+LITEdata$race[which(LITEdata$race == 4)] = 0
+LITEdata$race[which(LITEdata$race == 5)] = 1
+
+# Drop variables with NAs
+N = nrow(LITEdata)
+sum(is.na(LITEdata$cond))
+sum(is.na(LITEdata$att))
+sum(is.na(LITEdata$sex))
+sum(is.na(LITEdata$age))
+sum(is.na(LITEdata$race))
+sum(is.na(LITEdata$bmi))
+sum(is.na(LITEdata$wgt0))
+sum(is.na(LITEdata$wgt6))
+sum(is.na(LITEdata$wgt24))
+
+# wgt6: 56 NAs (among N = 612)
+sum(is.na(LITEdata$wgt6))
+# wgt24: 121 NAs (among N = 612)
+sum(is.na(LITEdata$wgt24))
+# both NA: 37 NAs (among N = 612)
+sum(is.na(LITEdata$wgt6)*is.na(LITEdata$wgt24))
+# Total NA: 140 NAs (among N = 612)
+sum((is.na(LITEdata$wgt6) + is.na(LITEdata$wgt24))>=1)
+
+# Outcome: Weight change between wgt 0 and wgt 24
+LITEdata$wgtchange0_24 = LITEdata$wgt24 - LITEdata$wgt0
+# Post-treatment confounder: Weight change between wgt 0 and wgt 6
+LITEdata$wgtchange0_6 = LITEdata$wgt6 - LITEdata$wgt0
+# Post-treatment confounder: Weight change between wgt 0 and wgt 6
+LITEdata$trtmerge = ifelse(LITEdata$trt<2.5,0,1)
+
+# Delete all NAs -> No!
+# LITEdata = LITEdata[-which(apply(is.na(LITEdata), 1, sum)>0),]
+# Delete race which is not Black or White (612-18 = 594)
+LITEdata = LITEdata[-which(is.na(LITEdata$race)==1),]
+
+Y24 = LITEdata$wgt24
+Y06 = LITEdata$wgt6
+Y00 = LITEdata$wgt0
+
+Y = LITEdata$wgtchange0_24
+M = LITEdata$att
+V = LITEdata$wgtchange0_6
+Z = LITEdata$trtmerge
+{
+  esttype = "mean"
+  # esttype = "median"
+  save_cluster = TRUE
+  # save_cluster = FALSE
+  
+  # Extract ID for simulated dataset (specific to LSF computing cluster)
+  # Note: The LSB_JOBINDEX is specified in the bsub command using the -J
+  # option
+  run_ID = 1
+  
+  # Specify the seed so can repeat simulation later if necessary
+  set.seed(run_ID)
+  
+  # ------------------------------------------------------------------------------
+  # Define of constants (adjust to fit the data generating scenario) -------------
+  # ------------------------------------------------------------------------------
+  # Define number of observations per draw when using Monte Carlo integration to
+  # integrate out confounders
+  D = 1e4
+  
+  # Define number of Markov Chain Monte Carlo (MCMC) draws in Gibbs Sampler
+  # Define number of MCMC draws to 'burn' in Gibbs Sampler (check convergence)
+  gibbs_iter = 1e5
+  gibbs_burnin = 5e4
+  # gibbs_iter = 5e3
+  # gibbs_burnin = 5e3
+  
+  # the number of MC integration per iteration for a MCMC chain
+  # gibbs_thin = 10
+  gibbs_thin = 100
+  # gibbs_num = 2e3
+  # gibbs_thin = floor(gibbs_iter/gibbs_num)
+  
+  # Define number of Monte Carlo draws when using Monte Carlo integration to
+  # integrate out confounders
+  # num_MC = 1e4
+  # num_MC = 1e3
+  num_MC = 1e2
+  
+  # num_MC_prior
+  num_MC_prior = 1e5
+  
+  rho = "unif"
+  
+  # ------------------------------------------------------------------------------
+  # End Definition of Constants --------------------------------------------------
+  # ------------------------------------------------------------------------------
+}
+```
+
+\newpage
+```{r}
+summary(V)
+summary(M)
+summary(Y)
+
+plot(Y)
+plot(M)
+plot(M,Y)
+
+Y00Y06Y24M_sum = rbind(c(mean(Y00),mean(Y00[Z==1]),mean(Y00[Z==0])),
+                       c(mean(M),mean(M[Z==1]),mean(M[Z==0])),
+                       c(mean(Y06,na.rm=T),mean(Y06[Z==1],na.rm=T),mean(Y06[Z==0],na.rm=T)),
+                       c(mean(Y24,na.rm=T),mean(Y24[Z==1],na.rm=T),mean(Y24[Z==0],na.rm=T)))
+Y00Y06Y24M_sum = cbind(Y00Y06Y24M_sum, Y00Y06Y24M_sum[,2]-Y00Y06Y24M_sum[,3])
+colnames(Y00Y06Y24M_sum) = c("all","Z==1","Z==0","Z diff")
+rownames(Y00Y06Y24M_sum) = c("Y00","M","Y06","Y24")
+Y00Y06Y24M_sum
+
+is_naY06 = is.na(Y06)*1
+ind_naY06 = which(is_naY06==1)
+n_naY06 = length(ind_naY06)
+c(mean(Y00[ind_naY06]),mean(Y00[-ind_naY06]))
+c(mean(M[ind_naY06]),mean(M[-ind_naY06]))
+
+is_naY24 = is.na(Y24)*1
+ind_naY24 = which(is_naY24==1)
+n_naY24 = length(ind_naY24)
+c(mean(Y00[ind_naY24]),mean(Y00[-ind_naY24]))
+c(mean(M[ind_naY24]),mean(M[-ind_naY24]))
+
+is_naY0624 = is.na(Y24)*is.na(Y06)*1
+ind_naY0624 = which(is_naY0624==1)
+n_naY0624 = length(ind_naY0624)
+c(mean(Y00[ind_naY0624]),mean(Y00[-ind_naY0624]))
+c(mean(M[ind_naY0624]),mean(M[-ind_naY0624]))
+
+naM0 = cbind(c(sum(M==0),sum(M[ind_naY06]==0),sum(M[ind_naY24]==0),sum(M[ind_naY0624]==0)),
+             c(N, n_naY06, n_naY24, n_naY0624))
+naM0 = cbind(naM0,naM0[,1]/naM0[,2])
+colnames(naM0) = c("NA","Total","ratio")
+rownames(naM0) = c("M","M[naY06]","M[naY24]","M[naY0624]")
+naM0
+
+hist(M)
+hist(M[ind_naY06])
+hist(M[ind_naY24])
+hist(M[ind_naY0624])
+```
+
+\newpage
+# EDPM without a post-treatment confounder & Post-Processing
+```{r}
+# -------------------------------------------------------------------------
+# ---------------- EDP without a post-treatment confounder ----------------
+# -------------------------------------------------------------------------
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediation/RealDataAnalysis")
+
+# This code must be in your current directory or you can change the path.
+# Load cpp code
+sourceCpp("EDPsource_cpp_realdata.cpp")
+# Load R code
+source("EDPsource_r_realdata.R")
+
+Y24 = LITEdata$wgt24
+Y0  = LITEdata$wgt0
+M = LITEdata$att
+Z = LITEdata$trtmerge
+C = cbind(LITEdata$sex,
+          LITEdata$race,
+          LITEdata$age,
+          LITEdata$bmi)
+
+EDPmediation_result_noV = EDPmediation(Y24, Y0, M, Z, C, gibbs_iter, gibbs_burnin, gibbs_thin,
+                                   D, num_MC, num_MC_prior, esttype, save_cluster)
+
+Resulttable_noV = rbind(EDPmediation_result_noV$NIE_result_mc,
+                        EDPmediation_result_noV$NDE_result_mc,
+                        EDPmediation_result_noV$ATE_result_mc)
+rownames(Resulttable_noV) = c("NIE", "NDE", "ATE")
+
+NIE_table = EDPmediation_result_noV$NIE_result_mc
+NDE_table = EDPmediation_result_noV$NDE_result_mc
+ATE_table = EDPmediation_result_noV$ATE_result_mc
+
+NIE = EDPmediation_result_noV$NIE
+NDE = EDPmediation_result_noV$NDE
+ATE = EDPmediation_result_noV$ATE
+
+q95 = quantile(c(NIE,NDE,ATE),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIE),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDE),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATE),col="green",ylim=ylim_CE)
+
+Resulttable_noV
+```
+
+\newpage
+# EDPM
+```{r}
+# -------------------------------------------------------------------------
+# ------------------ EDP with a post-treatment confounder -----------------
+# -------------------------------------------------------------------------
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediationpost/RealDataAnalysis")
+
+# This code must be in your current directory or you can change the path.
+# Load cpp code
+sourceCpp("EDPsource_cpp_realdata.cpp")
+# Load R code
+source("EDPsource_r_realdata.R")
+
+# EDPM
+Y = LITEdata$wgt24
+M = LITEdata$att
+V = LITEdata$wgt6
+Z = LITEdata$trtmerge
+C = cbind(LITEdata$sex,
+          LITEdata$race,
+          LITEdata$age,
+          LITEdata$bmi,
+          LITEdata$wgt0)
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+```
+
+\newpage
+# Post-Processing - average
+
+### Post-Processing - rho = -0.3
+```{r}
+rho = -0.3
+POSTresultRhoM3 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoM3 = POSTresultRhoM3$NIE_result_mc
+NDE_tableRhoM3 = POSTresultRhoM3$NDE_result_mc
+ATE_tableRhoM3 = POSTresultRhoM3$ATE_result_mc
+
+CE_tableRhoM3 = rbind(NIE_tableRhoM3,NDE_tableRhoM3,ATE_tableRhoM3)
+rownames(CE_tableRhoM3) = c("NIE","NDE","ATE")
+
+NIERhoM3 = POSTresultRhoM3$NIE
+NDERhoM3 = POSTresultRhoM3$NDE
+ATERhoM3 = POSTresultRhoM3$ATE
+
+q95 = quantile(c(NIERhoM3,NDERhoM3,ATERhoM3),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM3),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM3),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM3),col="green",ylim=ylim_CE)
+CE_tableRhoM3
+```
+
+\newpage
+### Post-Processing - rho = -0.5
+```{r}
+rho = -0.5
+POSTresultRhoM5 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoM5 = POSTresultRhoM5$NIE_result_mc
+NDE_tableRhoM5 = POSTresultRhoM5$NDE_result_mc
+ATE_tableRhoM5 = POSTresultRhoM5$ATE_result_mc
+
+CE_tableRhoM5 = rbind(NIE_tableRhoM5,NDE_tableRhoM5,ATE_tableRhoM5)
+rownames(CE_tableRhoM5) = c("NIE","NDE","ATE")
+
+NIERhoM5 = POSTresultRhoM5$NIE
+NDERhoM5 = POSTresultRhoM5$NDE
+ATERhoM5 = POSTresultRhoM5$ATE
+
+q95 = quantile(c(NIERhoM5,NDERhoM5,ATERhoM5),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM5),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM5),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM5),col="green",ylim=ylim_CE)
+CE_tableRhoM5
+```
+
+\newpage
+### Post-Processing - rho = -0.8
+```{r}
+rho = -0.8
+POSTresultRhoM8 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoM8 = POSTresultRhoM8$NIE_result_mc
+NDE_tableRhoM8 = POSTresultRhoM8$NDE_result_mc
+ATE_tableRhoM8 = POSTresultRhoM8$ATE_result_mc
+
+CE_tableRhoM8 = rbind(NIE_tableRhoM8,NDE_tableRhoM8,ATE_tableRhoM8)
+rownames(CE_tableRhoM8) = c("NIE","NDE","ATE")
+
+NIERhoM8 = POSTresultRhoM8$NIE
+NDERhoM8 = POSTresultRhoM8$NDE
+ATERhoM8 = POSTresultRhoM8$ATE
+
+q95 = quantile(c(NIERhoM8,NDERhoM8,ATERhoM8),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM8),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM8),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM8),col="green",ylim=ylim_CE)
+CE_tableRhoM8
+```
+
+\newpage
+### Post-Processing - rho = 0
+```{r}
+rho = 0
+POSTresultRho0 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRho0 = POSTresultRho0$NIE_result_mc
+NDE_tableRho0 = POSTresultRho0$NDE_result_mc
+ATE_tableRho0 = POSTresultRho0$ATE_result_mc
+
+CE_tableRho0 = rbind(NIE_tableRho0,NDE_tableRho0,ATE_tableRho0)
+rownames(CE_tableRho0) = c("NIE","NDE","ATE")
+
+NIErho0 = POSTresultRho0$NIE
+NDErho0 = POSTresultRho0$NDE
+ATErho0 = POSTresultRho0$ATE
+
+q95 = quantile(c(NIErho0,NDErho0,ATErho0),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErho0),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErho0),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErho0),col="green",ylim=ylim_CE)
+CE_tableRho0
+```
+
+\newpage
+### Post-Processing - rho = 0.3 (true)
+```{r}
+rho = 0.3
+POSTresultRho3 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRho3 = POSTresultRho3$NIE_result_mc
+NDE_tableRho3 = POSTresultRho3$NDE_result_mc
+ATE_tableRho3 = POSTresultRho3$ATE_result_mc
+
+CE_tableRho3 = rbind(NIE_tableRho3,NDE_tableRho3,ATE_tableRho3)
+rownames(CE_tableRho3) = c("NIE","NDE","ATE")
+
+NIErho3 = POSTresultRho3$NIE
+NDErho3 = POSTresultRho3$NDE
+ATErho3 = POSTresultRho3$ATE
+
+q95 = quantile(c(NIErho3,NDErho3,ATErho3),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErho3),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErho3),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErho3),col="green",ylim=ylim_CE)
+CE_tableRho3
+```
+
+\newpage
+### Post-Processing - rho = 0.5
+```{r}
+rho = 0.5
+POSTresultRho5 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRho5 = POSTresultRho5$NIE_result_mc
+NDE_tableRho5 = POSTresultRho5$NDE_result_mc
+ATE_tableRho5 = POSTresultRho5$ATE_result_mc
+
+CE_tableRho5 = rbind(NIE_tableRho5,NDE_tableRho5,ATE_tableRho5)
+rownames(CE_tableRho5) = c("NIE","NDE","ATE")
+
+NIErho5 = POSTresultRho5$NIE
+NDErho5 = POSTresultRho5$NDE
+ATErho5 = POSTresultRho5$ATE
+
+q95 = quantile(c(NIErho5,NDErho5,ATErho5),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErho5),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErho5),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErho5),col="green",ylim=ylim_CE)
+CE_tableRho5
+```
+
+\newpage
+### Post-Processing - rho = 0.8
+```{r}
+rho = 0.8
+POSTresultRho8 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRho8 = POSTresultRho8$NIE_result_mc
+NDE_tableRho8 = POSTresultRho8$NDE_result_mc
+ATE_tableRho8 = POSTresultRho8$ATE_result_mc
+
+CE_tableRho8 = rbind(NIE_tableRho8,NDE_tableRho8,ATE_tableRho8)
+rownames(CE_tableRho8) = c("NIE","NDE","ATE")
+
+NIErho8 = POSTresultRho8$NIE
+NDErho8 = POSTresultRho8$NDE
+ATErho8 = POSTresultRho8$ATE
+
+q95 = quantile(c(NIErho8,NDErho8,ATErho8),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErho8),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErho8),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErho8),col="green",ylim=ylim_CE)
+CE_tableRho8
+```
+
+\newpage
+### Post-Processing - rho = "triangle(-1,0,-1); (lower, upper, mode)"
+```{r}
+rho = "trim10"
+POSTresultRhoTrim10 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoTrim10 = POSTresultRhoTrim10$NIE_result_mc
+NDE_tableRhoTrim10 = POSTresultRhoTrim10$NDE_result_mc
+ATE_tableRhoTrim10 = POSTresultRhoTrim10$ATE_result_mc
+
+CE_tableRhoTrim10 = rbind(NIE_tableRhoTrim10,NDE_tableRhoTrim10,ATE_tableRhoTrim10)
+rownames(CE_tableRhoTrim10) = c("NIE","NDE","ATE")
+
+NIErhoTrim10 = POSTresultRhoTrim10$NIE
+NDErhoTrim10 = POSTresultRhoTrim10$NDE
+ATErhoTrim10 = POSTresultRhoTrim10$ATE
+
+q95 = quantile(c(NIErhoTrim10,NDErhoTrim10,ATErhoTrim10),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoTrim10),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoTrim10),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoTrim10),col="green",ylim=ylim_CE)
+CE_tableRhoTrim10
+```
+
+\newpage
+### Post-Processing - rho = "unif(-1,0)"
+```{r}
+rho = "unifm10"
+POSTresultRhoUnifm10 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnifm10 = POSTresultRhoUnifm10$NIE_result_mc
+NDE_tableRhoUnifm10 = POSTresultRhoUnifm10$NDE_result_mc
+ATE_tableRhoUnifm10 = POSTresultRhoUnifm10$ATE_result_mc
+
+CE_tableRhoUnifm10 = rbind(NIE_tableRhoUnifm10,NDE_tableRhoUnifm10,ATE_tableRhoUnifm10)
+rownames(CE_tableRhoUnifm10) = c("NIE","NDE","ATE")
+
+NIErhoUnifm10 = POSTresultRhoUnifm10$NIE
+NDErhoUnifm10 = POSTresultRhoUnifm10$NDE
+ATErhoUnifm10 = POSTresultRhoUnifm10$ATE
+
+q95 = quantile(c(NIErhoUnifm10,NDErhoUnifm10,ATErhoUnifm10),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnifm10),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnifm10),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnifm10),col="green",ylim=ylim_CE)
+CE_tableRhoUnifm10
+```
+
+\newpage
+### Post-Processing - rho = "unif(-1,1)"
+```{r}
+rho = "unifm11"
+POSTresultRhoUnifm11 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnifm11 = POSTresultRhoUnifm11$NIE_result_mc
+NDE_tableRhoUnifm11 = POSTresultRhoUnifm11$NDE_result_mc
+ATE_tableRhoUnifm11 = POSTresultRhoUnifm11$ATE_result_mc
+
+CE_tableRhoUnifm11 = rbind(NIE_tableRhoUnifm11,NDE_tableRhoUnifm11,ATE_tableRhoUnifm11)
+rownames(CE_tableRhoUnifm11) = c("NIE","NDE","ATE")
+
+NIErhoUnifm11 = POSTresultRhoUnifm11$NIE
+NDErhoUnifm11 = POSTresultRhoUnifm11$NDE
+ATErhoUnifm11 = POSTresultRhoUnifm11$ATE
+
+q95 = quantile(c(NIErhoUnifm11,NDErhoUnifm11,ATErhoUnifm11),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnifm11),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnifm11),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnifm11),col="green",ylim=ylim_CE)
+CE_tableRhoUnifm11
+```
+
+\newpage
+### Post-Processing - rho = "unif(0,1)"
+```{r}
+rho = "unif01"
+POSTresultRhoUnif01 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif01 = POSTresultRhoUnif01$NIE_result_mc
+NDE_tableRhoUnif01 = POSTresultRhoUnif01$NDE_result_mc
+ATE_tableRhoUnif01 = POSTresultRhoUnif01$ATE_result_mc
+
+CE_tableRhoUnif01 = rbind(NIE_tableRhoUnif01,NDE_tableRhoUnif01,ATE_tableRhoUnif01)
+rownames(CE_tableRhoUnif01) = c("NIE","NDE","ATE")
+
+NIErhoUnif01 = POSTresultRhoUnif01$NIE
+NDErhoUnif01 = POSTresultRhoUnif01$NDE
+ATErhoUnif01 = POSTresultRhoUnif01$ATE
+
+q95 = quantile(c(NIErhoUnif01,NDErhoUnif01,ATErhoUnif01),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif01),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif01),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif01),col="green",ylim=ylim_CE)
+CE_tableRhoUnif01
+```
+
+\newpage
+### Post-Processing - rho = "triangle(0,1,1); (lower, upper, mode)"
+```{r}
+rho = "tri01"
+POSTresultRhoTri01 = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoTri01 = POSTresultRhoTri01$NIE_result_mc
+NDE_tableRhoTri01 = POSTresultRhoTri01$NDE_result_mc
+ATE_tableRhoTri01 = POSTresultRhoTri01$ATE_result_mc
+
+CE_tableRhoTri01 = rbind(NIE_tableRhoTri01,NDE_tableRhoTri01,ATE_tableRhoTri01)
+rownames(CE_tableRhoTri01) = c("NIE","NDE","ATE")
+
+NIErhoTri01 = POSTresultRhoTri01$NIE
+NDErhoTri01 = POSTresultRhoTri01$NDE
+ATErhoTri01 = POSTresultRhoTri01$ATE
+
+q95 = quantile(c(NIErhoTri01,NDErhoTri01,ATErhoTri01),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoTri01),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoTri01),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoTri01),col="green",ylim=ylim_CE)
+CE_tableRhoTri01
+```
+
+\newpage
+### Results Summary
+```{r}
+print("mean(V[Z==1],na.rm=T)-mean(V[Z==0],na.rm=T)")
+mean(V[Z==1],na.rm=T)-mean(V[Z==0],na.rm=T)
+
+print("mean(M[Z==1],na.rm=T)-mean(M[Z==0],na.rm=T)")
+mean(M[Z==1],na.rm=T)-mean(M[Z==0],na.rm=T)
+
+print("mean(Y[Z==1],na.rm=T)-mean(Y[Z==0],na.rm=T)")
+mean(Y[Z==1],na.rm=T)-mean(Y[Z==0],na.rm=T)
+
+print("EDP with a post-treatment confounder & rho = triangle(-1,0,-1); (lower, upper, mode)")
+CE_tableRhoTrim10
+
+print("EDP with a post-treatment confounder & rho = unif(-1,0)")
+CE_tableRhoUnifm10
+
+print("EDP with a post-treatment confounder & rho = unif(-1,1)")
+CE_tableRhoUnifm11
+
+print("EDP with a post-treatment confounder & rho = unif(0,1)")
+CE_tableRhoUnif01
+
+print("EDP with a post-treatment confounder & rho = triangle(0,1,1); (lower, upper, mode)")
+CE_tableRhoTri01
+
+print("EDP with a post-treatment confounder & rho = -0.8")
+CE_tableRhoM8
+
+print("EDP with a post-treatment confounder & rho = -0.5")
+CE_tableRhoM5
+
+print("EDP with a post-treatment confounder & rho = -0.3")
+CE_tableRhoM3
+
+print("EDP with a post-treatment confounder & rho = 0")
+CE_tableRho0
+
+print("EDP with a post-treatment confounder & rho = 0.3 (true)")
+CE_tableRho3
+
+print("EDP with a post-treatment confounder & rho = 0.5")
+CE_tableRho5
+
+print("EDP with a post-treatment confounder & rho = 0.8")
+CE_tableRho8
+
+print("EDP without a post-treatment confounder")
+Resulttable_noV
+```
+
+\newpage
+### dist. of M
+```{r}
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+
+  rho = runif(n_MCMC)
+
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy,
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array,
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega,
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc,
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+
+  M0_mc = unlist(M0_mc)
+  Mr_mc = unlist(Mr_mc)
+  M1_mc = unlist(M1_mc)
+  
+  mean(M)
+  mean(M[Z==0])
+  mean(M[Z==1])
+  
+  # n = MCMCresult$constants$D
+  n = 1e4
+  ylim_CE = c( 0.0, 2.0)
+  xlim_CE = c( min(M) - 1, max(M)+1)
+  
+  # print("dist. of M based on the data")
+  plot(density(M),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+  plot(density(M[Z==0]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+  plot(density(M[Z==1]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+  legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+         lty=rep(1,3), cex=1, text.font=4)
+  
+  # print("dist. of M based on the G-computation")
+  ylim_CE = c( 0.0, 2.0)
+  plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+  plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+  plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+  # abline(v = 0, col = "black", lwd = 2)
+  # abline(v = 1, col = "black", lwd = 2)
+  legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+         lty=rep(1,3), cex=1, text.font=4)
+  
+  # print("histogram of M based on the G-computation")
+  ylim_CE = c( 0.0, 100)
+  hist(M,20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+  hist(M[Z==0],20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+  hist(M[Z==1],20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+  
+  # print("histogram of M based on the G-computation")
+  ylim_CE = c( 0.0, 100000)
+  hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+  hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+  hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+  
+  # Define design matrix
+  p_C = ncol(C)
+  p_C1 = sum(apply(C, 2, function(x) { all(x %in% 0:1) }))
+  p_C2 = p_C - p_C1
+  if (p_C1>0 && p_C2>0){
+    C1 = C[,1:p_C1]
+    C2 = C[,(p_C1+1):(p_C1+p_C2)]
+    scaC2 = apply(C2, 2, scale)
+    scaC = cbind(C1, scaC2)
+  } else if (p_C2>0){
+    scaC = apply(C, 2, scale)
+  } else {
+    scaC = C
+  }
+  X = cbind(Z, scaC)
+  matX = cbind(1, X)
+  matV = cbind(1, Z, V, scaC)
+}
+apply(matV[-which(is.na(V)),] %*% MCMCresult$MCMCposteriors$MbetaLists[[post_reps]], 2, mean)
+apply(matV[-which(is.na(V)),] %*% MCMCresult$MCMCposteriors$MbetaLists[[post_reps]], 2, median)
+n_rk
+```
+
+\newpage
+# Post-Processing -  conditional on race = 0 (black) / race = 1 (white)
+
+### Post-Processing - rho = -0.3 conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = -0.3
+POSTresultRhoM3_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoM3_black = POSTresultRhoM3_black$NIE_result_mc
+NDE_tableRhoM3_black = POSTresultRhoM3_black$NDE_result_mc
+ATE_tableRhoM3_black = POSTresultRhoM3_black$ATE_result_mc
+
+CE_tableRhoM3_black = rbind(NIE_tableRhoM3_black,NDE_tableRhoM3_black,ATE_tableRhoM3_black)
+rownames(CE_tableRhoM3_black) = c("NIE","NDE","ATE")
+
+NIERhoM3_black = POSTresultRhoM3_black$NIE
+NDERhoM3_black = POSTresultRhoM3_black$NDE
+ATERhoM3_black = POSTresultRhoM3_black$ATE
+
+q95 = quantile(c(NIERhoM3_black,NDERhoM3_black,ATERhoM3_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM3_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM3_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM3_black),col="green",ylim=ylim_CE)
+CE_tableRhoM3_black
+
+POSTresultRhoM3_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoM3_white = POSTresultRhoM3_white$NIE_result_mc
+NDE_tableRhoM3_white = POSTresultRhoM3_white$NDE_result_mc
+ATE_tableRhoM3_white = POSTresultRhoM3_white$ATE_result_mc
+
+CE_tableRhoM3_white = rbind(NIE_tableRhoM3_white,NDE_tableRhoM3_white,ATE_tableRhoM3_white)
+rownames(CE_tableRhoM3_white) = c("NIE","NDE","ATE")
+
+NIERhoM3_white = POSTresultRhoM3_white$NIE
+NDERhoM3_white = POSTresultRhoM3_white$NDE
+ATERhoM3_white = POSTresultRhoM3_white$ATE
+
+q95 = quantile(c(NIERhoM3_white,NDERhoM3_white,ATERhoM3_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM3_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM3_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM3_white),col="green",ylim=ylim_CE)
+CE_tableRhoM3_white
+```
+
+\newpage
+### Post-Processing - rho = -0.5 conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = -0.5
+POSTresultRhoM5_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoM5_black = POSTresultRhoM5_black$NIE_result_mc
+NDE_tableRhoM5_black = POSTresultRhoM5_black$NDE_result_mc
+ATE_tableRhoM5_black = POSTresultRhoM5_black$ATE_result_mc
+
+CE_tableRhoM5_black = rbind(NIE_tableRhoM5_black,NDE_tableRhoM5_black,ATE_tableRhoM5_black)
+rownames(CE_tableRhoM5_black) = c("NIE","NDE","ATE")
+
+NIERhoM5_black = POSTresultRhoM5_black$NIE
+NDERhoM5_black = POSTresultRhoM5_black$NDE
+ATERhoM5_black = POSTresultRhoM5_black$ATE
+
+q95 = quantile(c(NIERhoM5_black,NDERhoM5_black,ATERhoM5_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM5_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM5_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM5_black),col="green",ylim=ylim_CE)
+CE_tableRhoM5_black
+
+POSTresultRhoM5_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoM5_white = POSTresultRhoM5_white$NIE_result_mc
+NDE_tableRhoM5_white = POSTresultRhoM5_white$NDE_result_mc
+ATE_tableRhoM5_white = POSTresultRhoM5_white$ATE_result_mc
+
+CE_tableRhoM5_white = rbind(NIE_tableRhoM5_white,NDE_tableRhoM5_white,ATE_tableRhoM5_white)
+rownames(CE_tableRhoM5_white) = c("NIE","NDE","ATE")
+
+NIERhoM5_white = POSTresultRhoM5_white$NIE
+NDERhoM5_white = POSTresultRhoM5_white$NDE
+ATERhoM5_white = POSTresultRhoM5_white$ATE
+
+q95 = quantile(c(NIERhoM5_white,NDERhoM5_white,ATERhoM5_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM5_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM5_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM5_white),col="green",ylim=ylim_CE)
+CE_tableRhoM5_white
+```
+
+\newpage
+### Post-Processing - rho = -0.8 conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = -0.8
+POSTresultRhoM8_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoM8_black = POSTresultRhoM8_black$NIE_result_mc
+NDE_tableRhoM8_black = POSTresultRhoM8_black$NDE_result_mc
+ATE_tableRhoM8_black = POSTresultRhoM8_black$ATE_result_mc
+
+CE_tableRhoM8_black = rbind(NIE_tableRhoM8_black,NDE_tableRhoM8_black,ATE_tableRhoM8_black)
+rownames(CE_tableRhoM8_black) = c("NIE","NDE","ATE")
+
+NIERhoM8_black = POSTresultRhoM8_black$NIE
+NDERhoM8_black = POSTresultRhoM8_black$NDE
+ATERhoM8_black = POSTresultRhoM8_black$ATE
+
+q95 = quantile(c(NIERhoM8_black,NDERhoM8_black,ATERhoM8_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM8_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM8_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM8_black),col="green",ylim=ylim_CE)
+CE_tableRhoM8_black
+
+POSTresultRhoM8_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoM8_white = POSTresultRhoM8_white$NIE_result_mc
+NDE_tableRhoM8_white = POSTresultRhoM8_white$NDE_result_mc
+ATE_tableRhoM8_white = POSTresultRhoM8_white$ATE_result_mc
+
+CE_tableRhoM8_white = rbind(NIE_tableRhoM8_white,NDE_tableRhoM8_white,ATE_tableRhoM8_white)
+rownames(CE_tableRhoM8_white) = c("NIE","NDE","ATE")
+
+NIERhoM8_white = POSTresultRhoM8_white$NIE
+NDERhoM8_white = POSTresultRhoM8_white$NDE
+ATERhoM8_white = POSTresultRhoM8_white$ATE
+
+q95 = quantile(c(NIERhoM8_white,NDERhoM8_white,ATERhoM8_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoM8_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoM8_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoM8_white),col="green",ylim=ylim_CE)
+CE_tableRhoM8_white
+```
+
+\newpage
+### Post-Processing - rho = 0 conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = 0
+POSTresultRho0_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho0_black = POSTresultRho0_black$NIE_result_mc
+NDE_tableRho0_black = POSTresultRho0_black$NDE_result_mc
+ATE_tableRho0_black = POSTresultRho0_black$ATE_result_mc
+
+CE_tableRho0_black = rbind(NIE_tableRho0_black,NDE_tableRho0_black,ATE_tableRho0_black)
+rownames(CE_tableRho0_black) = c("NIE","NDE","ATE")
+
+NIERho0_black = POSTresultRho0_black$NIE
+NDERho0_black = POSTresultRho0_black$NDE
+ATERho0_black = POSTresultRho0_black$ATE
+
+q95 = quantile(c(NIERho0_black,NDERho0_black,ATERho0_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho0_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho0_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho0_black),col="green",ylim=ylim_CE)
+CE_tableRho0_black
+
+POSTresultRho0_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho0_white = POSTresultRho0_white$NIE_result_mc
+NDE_tableRho0_white = POSTresultRho0_white$NDE_result_mc
+ATE_tableRho0_white = POSTresultRho0_white$ATE_result_mc
+
+CE_tableRho0_white = rbind(NIE_tableRho0_white,NDE_tableRho0_white,ATE_tableRho0_white)
+rownames(CE_tableRho0_white) = c("NIE","NDE","ATE")
+
+NIERho0_white = POSTresultRho0_white$NIE
+NDERho0_white = POSTresultRho0_white$NDE
+ATERho0_white = POSTresultRho0_white$ATE
+
+q95 = quantile(c(NIERho0_white,NDERho0_white,ATERho0_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho0_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho0_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho0_white),col="green",ylim=ylim_CE)
+CE_tableRho0_white
+```
+
+\newpage
+### Post-Processing - rho = 0.3 (true) conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = 0.3
+POSTresultRho03_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho03_black = POSTresultRho03_black$NIE_result_mc
+NDE_tableRho03_black = POSTresultRho03_black$NDE_result_mc
+ATE_tableRho03_black = POSTresultRho03_black$ATE_result_mc
+
+CE_tableRho03_black = rbind(NIE_tableRho03_black,NDE_tableRho03_black,ATE_tableRho03_black)
+rownames(CE_tableRho03_black) = c("NIE","NDE","ATE")
+
+NIERho03_black = POSTresultRho03_black$NIE
+NDERho03_black = POSTresultRho03_black$NDE
+ATERho03_black = POSTresultRho03_black$ATE
+
+q95 = quantile(c(NIERho03_black,NDERho03_black,ATERho03_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho03_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho03_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho03_black),col="green",ylim=ylim_CE)
+CE_tableRho03_black
+
+POSTresultRho03_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho03_white = POSTresultRho03_white$NIE_result_mc
+NDE_tableRho03_white = POSTresultRho03_white$NDE_result_mc
+ATE_tableRho03_white = POSTresultRho03_white$ATE_result_mc
+
+CE_tableRho03_white = rbind(NIE_tableRho03_white,NDE_tableRho03_white,ATE_tableRho03_white)
+rownames(CE_tableRho03_white) = c("NIE","NDE","ATE")
+
+NIERho03_white = POSTresultRho03_white$NIE
+NDERho03_white = POSTresultRho03_white$NDE
+ATERho03_white = POSTresultRho03_white$ATE
+
+q95 = quantile(c(NIERho03_white,NDERho03_white,ATERho03_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho03_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho03_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho03_white),col="green",ylim=ylim_CE)
+CE_tableRho03_white
+```
+
+\newpage
+### Post-Processing - rho = 0.5 conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = 0.5
+POSTresultRho05_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho05_black = POSTresultRho05_black$NIE_result_mc
+NDE_tableRho05_black = POSTresultRho05_black$NDE_result_mc
+ATE_tableRho05_black = POSTresultRho05_black$ATE_result_mc
+
+CE_tableRho05_black = rbind(NIE_tableRho05_black,NDE_tableRho05_black,ATE_tableRho05_black)
+rownames(CE_tableRho05_black) = c("NIE","NDE","ATE")
+
+NIERho05_black = POSTresultRho05_black$NIE
+NDERho05_black = POSTresultRho05_black$NDE
+ATERho05_black = POSTresultRho05_black$ATE
+
+q95 = quantile(c(NIERho05_black,NDERho05_black,ATERho05_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho05_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho05_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho05_black),col="green",ylim=ylim_CE)
+CE_tableRho05_black
+
+POSTresultRho05_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho05_white = POSTresultRho05_white$NIE_result_mc
+NDE_tableRho05_white = POSTresultRho05_white$NDE_result_mc
+ATE_tableRho05_white = POSTresultRho05_white$ATE_result_mc
+
+CE_tableRho05_white = rbind(NIE_tableRho05_white,NDE_tableRho05_white,ATE_tableRho05_white)
+rownames(CE_tableRho05_white) = c("NIE","NDE","ATE")
+
+NIERho05_white = POSTresultRho05_white$NIE
+NDERho05_white = POSTresultRho05_white$NDE
+ATERho05_white = POSTresultRho05_white$ATE
+
+q95 = quantile(c(NIERho05_white,NDERho05_white,ATERho05_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho05_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho05_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho05_white),col="green",ylim=ylim_CE)
+CE_tableRho05_white
+```
+
+\newpage
+### Post-Processing - rho = 0.8 conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = 0.8
+POSTresultRho08_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho08_black = POSTresultRho08_black$NIE_result_mc
+NDE_tableRho08_black = POSTresultRho08_black$NDE_result_mc
+ATE_tableRho08_black = POSTresultRho08_black$ATE_result_mc
+
+CE_tableRho08_black = rbind(NIE_tableRho08_black,NDE_tableRho08_black,ATE_tableRho08_black)
+rownames(CE_tableRho08_black) = c("NIE","NDE","ATE")
+
+NIERho08_black = POSTresultRho08_black$NIE
+NDERho08_black = POSTresultRho08_black$NDE
+ATERho08_black = POSTresultRho08_black$ATE
+
+q95 = quantile(c(NIERho08_black,NDERho08_black,ATERho08_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho08_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho08_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho08_black),col="green",ylim=ylim_CE)
+CE_tableRho08_black
+
+POSTresultRho08_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRho08_white = POSTresultRho08_white$NIE_result_mc
+NDE_tableRho08_white = POSTresultRho08_white$NDE_result_mc
+ATE_tableRho08_white = POSTresultRho08_white$ATE_result_mc
+
+CE_tableRho08_white = rbind(NIE_tableRho08_white,NDE_tableRho08_white,ATE_tableRho08_white)
+rownames(CE_tableRho08_white) = c("NIE","NDE","ATE")
+
+NIERho08_white = POSTresultRho08_white$NIE
+NDERho08_white = POSTresultRho08_white$NDE
+ATERho08_white = POSTresultRho08_white$ATE
+
+q95 = quantile(c(NIERho08_white,NDERho08_white,ATERho08_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERho08_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERho08_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERho08_white),col="green",ylim=ylim_CE)
+CE_tableRho08_white
+```
+
+\newpage
+### Post-Processing - rho = "triangle(-1,0,-1); (lower, upper, mode)" conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = "trim10"
+POSTresultRhoTrim10_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoTrim10_black = POSTresultRhoTrim10_black$NIE_result_mc
+NDE_tableRhoTrim10_black = POSTresultRhoTrim10_black$NDE_result_mc
+ATE_tableRhoTrim10_black = POSTresultRhoTrim10_black$ATE_result_mc
+
+CE_tableRhoTrim10_black = rbind(NIE_tableRhoTrim10_black,NDE_tableRhoTrim10_black,ATE_tableRhoTrim10_black)
+rownames(CE_tableRhoTrim10_black) = c("NIE","NDE","ATE")
+
+NIErhoTrim10_black = POSTresultRhoTrim10_black$NIE
+NDErhoTrim10_black = POSTresultRhoTrim10_black$NDE
+ATErhoTrim10_black = POSTresultRhoTrim10_black$ATE
+
+q95 = quantile(c(NIErhoTrim10_black,NDErhoTrim10_black,ATErhoTrim10_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoTrim10_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoTrim10_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoTrim10_black),col="green",ylim=ylim_CE)
+CE_tableRhoTrim10_black
+
+POSTresultRhoTrim10_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoTrim10_white = POSTresultRhoTrim10_white$NIE_result_mc
+NDE_tableRhoTrim10_white = POSTresultRhoTrim10_white$NDE_result_mc
+ATE_tableRhoTrim10_white = POSTresultRhoTrim10_white$ATE_result_mc
+
+CE_tableRhoTrim10_white = rbind(NIE_tableRhoTrim10_white,NDE_tableRhoTrim10_white,ATE_tableRhoTrim10_white)
+rownames(CE_tableRhoTrim10_white) = c("NIE","NDE","ATE")
+
+NIErhoTrim10_white = POSTresultRhoTrim10_white$NIE
+NDErhoTrim10_white = POSTresultRhoTrim10_white$NDE
+ATErhoTrim10_white = POSTresultRhoTrim10_white$ATE
+
+q95 = quantile(c(NIErhoTrim10_white,NDErhoTrim10_white,ATErhoTrim10_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoTrim10_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoTrim10_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoTrim10_white),col="green",ylim=ylim_CE)
+CE_tableRhoTrim10_white
+```
+
+\newpage
+### Post-Processing - rho = "unif(-1,0)" conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = "unifm10"
+POSTresultRhoUnifm10_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoUnifm10_black = POSTresultRhoUnifm10_black$NIE_result_mc
+NDE_tableRhoUnifm10_black = POSTresultRhoUnifm10_black$NDE_result_mc
+ATE_tableRhoUnifm10_black = POSTresultRhoUnifm10_black$ATE_result_mc
+
+CE_tableRhoUnifm10_black = rbind(NIE_tableRhoUnifm10_black,NDE_tableRhoUnifm10_black,ATE_tableRhoUnifm10_black)
+rownames(CE_tableRhoUnifm10_black) = c("NIE","NDE","ATE")
+
+NIERhoUnifm10_black = POSTresultRhoUnifm10_black$NIE
+NDERhoUnifm10_black = POSTresultRhoUnifm10_black$NDE
+ATERhoUnifm10_black = POSTresultRhoUnifm10_black$ATE
+
+q95 = quantile(c(NIERhoUnifm10_black,NDERhoUnifm10_black,ATERhoUnifm10_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoUnifm10_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoUnifm10_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoUnifm10_black),col="green",ylim=ylim_CE)
+CE_tableRhoUnifm10_black
+
+POSTresultRhoUnifm10_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoUnifm10_white = POSTresultRhoUnifm10_white$NIE_result_mc
+NDE_tableRhoUnifm10_white = POSTresultRhoUnifm10_white$NDE_result_mc
+ATE_tableRhoUnifm10_white = POSTresultRhoUnifm10_white$ATE_result_mc
+
+CE_tableRhoUnifm10_white = rbind(NIE_tableRhoUnifm10_white,NDE_tableRhoUnifm10_white,ATE_tableRhoUnifm10_white)
+rownames(CE_tableRhoUnifm10_white) = c("NIE","NDE","ATE")
+
+NIERhoUnifm10_white = POSTresultRhoUnifm10_white$NIE
+NDERhoUnifm10_white = POSTresultRhoUnifm10_white$NDE
+ATERhoUnifm10_white = POSTresultRhoUnifm10_white$ATE
+
+q95 = quantile(c(NIERhoUnifm10_white,NDERhoUnifm10_white,ATERhoUnifm10_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoUnifm10_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoUnifm10_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoUnifm10_white),col="green",ylim=ylim_CE)
+CE_tableRhoUnifm10_white
+```
+
+\newpage
+### Post-Processing - rho = "unif(-1,1)" conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = "unifm11"
+POSTresultRhoUnifm11_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoUnifm11_black = POSTresultRhoUnifm11_black$NIE_result_mc
+NDE_tableRhoUnifm11_black = POSTresultRhoUnifm11_black$NDE_result_mc
+ATE_tableRhoUnifm11_black = POSTresultRhoUnifm11_black$ATE_result_mc
+
+CE_tableRhoUnifm11_black = rbind(NIE_tableRhoUnifm11_black,NDE_tableRhoUnifm11_black,ATE_tableRhoUnifm11_black)
+rownames(CE_tableRhoUnifm11_black) = c("NIE","NDE","ATE")
+
+NIERhoUnifm11_black = POSTresultRhoUnifm11_black$NIE
+NDERhoUnifm11_black = POSTresultRhoUnifm11_black$NDE
+ATERhoUnifm11_black = POSTresultRhoUnifm11_black$ATE
+
+q95 = quantile(c(NIERhoUnifm11_black,NDERhoUnifm11_black,ATERhoUnifm11_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoUnifm11_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoUnifm11_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoUnifm11_black),col="green",ylim=ylim_CE)
+CE_tableRhoUnifm11_black
+
+POSTresultRhoUnifm11_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoUnifm11_white = POSTresultRhoUnifm11_white$NIE_result_mc
+NDE_tableRhoUnifm11_white = POSTresultRhoUnifm11_white$NDE_result_mc
+ATE_tableRhoUnifm11_white = POSTresultRhoUnifm11_white$ATE_result_mc
+
+CE_tableRhoUnifm11_white = rbind(NIE_tableRhoUnifm11_white,NDE_tableRhoUnifm11_white,ATE_tableRhoUnifm11_white)
+rownames(CE_tableRhoUnifm11_white) = c("NIE","NDE","ATE")
+
+NIERhoUnifm11_white = POSTresultRhoUnifm11_white$NIE
+NDERhoUnifm11_white = POSTresultRhoUnifm11_white$NDE
+ATERhoUnifm11_white = POSTresultRhoUnifm11_white$ATE
+
+q95 = quantile(c(NIERhoUnifm11_white,NDERhoUnifm11_white,ATERhoUnifm11_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIERhoUnifm11_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDERhoUnifm11_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATERhoUnifm11_white),col="green",ylim=ylim_CE)
+CE_tableRhoUnifm11_white
+```
+
+\newpage
+### Post-Processing - rho = "unif(0,1)" conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = "unif01"
+POSTresultRhoUnif01_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif01_black = POSTresultRhoUnif01_black$NIE_result_mc
+NDE_tableRhoUnif01_black = POSTresultRhoUnif01_black$NDE_result_mc
+ATE_tableRhoUnif01_black = POSTresultRhoUnif01_black$ATE_result_mc
+
+CE_tableRhoUnif01_black = rbind(NIE_tableRhoUnif01_black,NDE_tableRhoUnif01_black,ATE_tableRhoUnif01_black)
+rownames(CE_tableRhoUnif01_black) = c("NIE","NDE","ATE")
+
+NIErhoUnif01_black = POSTresultRhoUnif01_black$NIE
+NDErhoUnif01_black = POSTresultRhoUnif01_black$NDE
+ATErhoUnif01_black = POSTresultRhoUnif01_black$ATE
+
+q95 = quantile(c(NIErhoUnif01_black,NDErhoUnif01_black,ATErhoUnif01_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif01_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif01_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif01_black),col="green",ylim=ylim_CE)
+CE_tableRhoUnif01_black
+
+POSTresultRhoUnif01_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif01_white = POSTresultRhoUnif01_white$NIE_result_mc
+NDE_tableRhoUnif01_white = POSTresultRhoUnif01_white$NDE_result_mc
+ATE_tableRhoUnif01_white = POSTresultRhoUnif01_white$ATE_result_mc
+
+CE_tableRhoUnif01_white = rbind(NIE_tableRhoUnif01_white,NDE_tableRhoUnif01_white,ATE_tableRhoUnif01_white)
+rownames(CE_tableRhoUnif01_white) = c("NIE","NDE","ATE")
+
+NIErhoUnif01_white = POSTresultRhoUnif01_white$NIE
+NDErhoUnif01_white = POSTresultRhoUnif01_white$NDE
+ATErhoUnif01_white = POSTresultRhoUnif01_white$ATE
+
+q95 = quantile(c(NIErhoUnif01_white,NDErhoUnif01_white,ATErhoUnif01_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif01_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif01_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif01_white),col="green",ylim=ylim_CE)
+CE_tableRhoUnif01_white
+```
+
+\newpage
+### Post-Processing - rho = "triangle(0,1,1); (lower, upper, mode)" conditional on race = 0 (black) / race = 1 (white)
+```{r}
+race0 = 0 # black
+race1 = 1 # white
+q_race = 2 # second confounder
+
+rho = "tri01"
+POSTresultRhoTri01_black = EDPmediationPOST_condC(MCMCresult, race0, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoTri01_black = POSTresultRhoTri01_black$NIE_result_mc
+NDE_tableRhoTri01_black = POSTresultRhoTri01_black$NDE_result_mc
+ATE_tableRhoTri01_black = POSTresultRhoTri01_black$ATE_result_mc
+
+CE_tableRhoTri01_black = rbind(NIE_tableRhoTri01_black,NDE_tableRhoTri01_black,ATE_tableRhoTri01_black)
+rownames(CE_tableRhoTri01_black) = c("NIE","NDE","ATE")
+
+NIErhoTri01_black = POSTresultRhoTri01_black$NIE
+NDErhoTri01_black = POSTresultRhoTri01_black$NDE
+ATErhoTri01_black = POSTresultRhoTri01_black$ATE
+
+q95 = quantile(c(NIErhoTri01_black,NDErhoTri01_black,ATErhoTri01_black),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoTri01_black),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoTri01_black),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoTri01_black),col="green",ylim=ylim_CE)
+CE_tableRhoTri01_black
+
+POSTresultRhoTri01_white = EDPmediationPOST_condC(MCMCresult, race1, q_race, esttype, rho, save_cluster)
+
+NIE_tableRhoTri01_white = POSTresultRhoTri01_white$NIE_result_mc
+NDE_tableRhoTri01_white = POSTresultRhoTri01_white$NDE_result_mc
+ATE_tableRhoTri01_white = POSTresultRhoTri01_white$ATE_result_mc
+
+CE_tableRhoTri01_white = rbind(NIE_tableRhoTri01_white,NDE_tableRhoTri01_white,ATE_tableRhoTri01_white)
+rownames(CE_tableRhoTri01_white) = c("NIE","NDE","ATE")
+
+NIErhoTri01_white = POSTresultRhoTri01_white$NIE
+NDErhoTri01_white = POSTresultRhoTri01_white$NDE
+ATErhoTri01_white = POSTresultRhoTri01_white$ATE
+
+q95 = quantile(c(NIErhoTri01_white,NDErhoTri01_white,ATErhoTri01_white),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoTri01_white),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoTri01_white),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoTri01_white),col="green",ylim=ylim_CE)
+CE_tableRhoTri01_white
+```
+
+\newpage
+### Results Summary - conditional on race = 0 (black) / race = 1 (white)
+```{r}
+print("EDP with a post-treatment confounder & rho = triangle(-1,0,-1); (lower, upper, mode)")
+CE_tableRhoTrim10_black
+CE_tableRhoTrim10_white
+
+print("EDP with a post-treatment confounder & rho = unif(-1,0)")
+CE_tableRhoUnifm10_black
+CE_tableRhoUnifm10_white
+
+print("EDP with a post-treatment confounder & rho = unif(-1,1)")
+CE_tableRhoUnifm11_black
+CE_tableRhoUnifm11_white
+
+print("EDP with a post-treatment confounder & rho = unif(0,1)")
+CE_tableRhoUnif01_black
+CE_tableRhoUnif01_white
+
+print("EDP with a post-treatment confounder & rho = triangle(0,1,1); (lower, upper, mode)")
+CE_tableRhoTri01_black
+CE_tableRhoTri01_white
+
+print("EDP with a post-treatment confounder & rho = -0.8")
+CE_tableRhoM8_black
+CE_tableRhoM8_white
+
+print("EDP with a post-treatment confounder & rho = -0.5")
+CE_tableRhoM5_black
+CE_tableRhoM5_white
+
+print("EDP with a post-treatment confounder & rho = -0.3")
+CE_tableRhoM3_black
+CE_tableRhoM3_white
+
+print("EDP with a post-treatment confounder & rho = 0")
+CE_tableRho0_black
+CE_tableRho0_white
+
+print("EDP with a post-treatment confounder & rho = 0.3 (true)")
+CE_tableRho03_black
+CE_tableRho03_white
+
+print("EDP with a post-treatment confounder & rho = 0.5")
+CE_tableRho05_black
+CE_tableRho05_white
+
+print("EDP with a post-treatment confounder & rho = 0.8")
+CE_tableRho08_black
+CE_tableRho08_white
+```
+
+\newpage
+# Posterior probability
+### P(CE|data)>0
+```{r}
+threshold = 0
+
+print("EDP with a post-treatment confounder & rho = triangle(-1,0,-1); (lower, upper, mode)")
+post.prop.Trim10 = matrix(c(sum(NIErhoTrim10>threshold), sum(NDErhoTrim10>threshold), sum(ATErhoTrim10>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = unif(-1,0)")
+post.prop.Unifm10 = matrix(c(sum(NIErhoUnifm10>threshold), sum(NDErhoUnifm10>threshold), sum(ATErhoUnifm10>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = unif(-1,1)")
+post.prop.Unifm11 = matrix(c(sum(NIErhoUnifm11>threshold), sum(NDErhoUnifm11>threshold), sum(ATErhoUnifm11>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = unif(0,1)")
+post.prop.Unif01 = matrix(c(sum(NIErhoUnif01>threshold), sum(NDErhoUnif01>threshold), sum(ATErhoUnif01>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = triangle(0,1,1); (lower, upper, mode)")
+post.prop.Tri01 = matrix(c(sum(NIErhoTri01>threshold), sum(NDErhoTri01>threshold), sum(ATErhoTri01>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = -0.8")
+post.prop.M8 = matrix(c(sum(NIERhoM8>threshold), sum(NDERhoM8>threshold), sum(ATERhoM8>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = -0.5")
+post.prop.M5 = matrix(c(sum(NIERhoM5>threshold), sum(NDERhoM5>threshold), sum(ATERhoM5>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = -0.3")
+post.prop.M3 = matrix(c(sum(NIERhoM3>threshold), sum(NDERhoM3>threshold), sum(ATERhoM3>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0")
+post.prop.0 = matrix(c(sum(NIErho0>threshold), sum(NDErho0>threshold), sum(ATErho0>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0.3 (true)")
+post.prop.3 = matrix(c(sum(NIErho3>threshold), sum(NDErho3>threshold), sum(ATErho3>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0.5")
+post.prop.5 = matrix(c(sum(NIErho5>threshold), sum(NDErho5>threshold), sum(ATErho5>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0.8")
+post.prop.8 = matrix(c(sum(NIErho8>threshold), sum(NDErho8>threshold), sum(ATErho8>threshold))/n_MCMC,ncol=3)
+
+print("EDP without a post-treatment confounder")
+post.prop.woOost = matrix(c(sum(NIE>threshold), sum(NDE>threshold), sum(ATE>threshold))/n_MCMC,ncol=3)
+
+post.prop = rbind(post.prop.Trim10,
+                  post.prop.Unifm10,
+                  post.prop.Unifm11,
+                  post.prop.Unif01,
+                  post.prop.Tri01,
+                  post.prop.M8,
+                  post.prop.M5,
+                  post.prop.M3,
+                  post.prop.0,
+                  post.prop.3,
+                  post.prop.5,
+                  post.prop.8,
+                  post.prop.woOost)
+colnames(post.prop) = c("NIE","NDE","ATE")
+rownames(post.prop) = c("TriM10","UnifM10","UnifM11","Unif01","Tri01",
+                        "M8","M5","M3","0","3","5","8","woPost")
+post.prop
+```
+
+\newpage
+# Posterior probability - conditional on race = 0 (black) / race = 1 (white)
+### P(CE|data)>0 - conditional on race = 0 (black) / race = 1 (white)
+```{r}
+threshold = 0
+
+print("EDP with a post-treatment confounder & rho = triangle(-1,0,-1); (lower, upper, mode)")
+post.prop.Trim10_white = matrix(c(sum(NIErhoTrim10_white>threshold), sum(NDErhoTrim10_white>threshold), sum(ATErhoTrim10_white>threshold))/n_MCMC,ncol=3)
+post.prop.Trim10_black = matrix(c(sum(NIErhoTrim10_black>threshold), sum(NDErhoTrim10_black>threshold), sum(ATErhoTrim10_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = unif(-1,0)")
+post.prop.Unifm10_white = matrix(c(sum(NIERhoUnifm10_white>threshold), sum(NDERhoUnifm10_white>threshold), sum(ATERhoUnifm10_white>threshold))/n_MCMC,ncol=3)
+post.prop.Unifm10_black = matrix(c(sum(NIERhoUnifm10_black>threshold), sum(NDERhoUnifm10_black>threshold), sum(ATERhoUnifm10_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = unif(-1,1)")
+post.prop.Unifm11_white = matrix(c(sum(NIERhoUnifm11_white>threshold), sum(NDERhoUnifm11_white>threshold), sum(ATERhoUnifm11_white>threshold))/n_MCMC,ncol=3)
+post.prop.Unifm11_black = matrix(c(sum(NIERhoUnifm11_black>threshold), sum(NDERhoUnifm11_black>threshold), sum(ATERhoUnifm11_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = unif(0,1)")
+post.prop.Unif01_white = matrix(c(sum(NIErhoUnif01_white>threshold), sum(NDErhoUnif01_white>threshold), sum(ATErhoUnif01_white>threshold))/n_MCMC,ncol=3)
+post.prop.Unif01_black = matrix(c(sum(NIErhoUnif01_black>threshold), sum(NDErhoUnif01_black>threshold), sum(ATErhoUnif01_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = triangle(0,1,1); (lower, upper, mode)")
+post.prop.Tri01_white = matrix(c(sum(NIErhoTri01_white>threshold), sum(NDErhoTri01_white>threshold), sum(ATErhoTri01_white>threshold))/n_MCMC,ncol=3)
+post.prop.Tri01_black = matrix(c(sum(NIErhoTri01_black>threshold), sum(NDErhoTri01_black>threshold), sum(ATErhoTri01_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = -0.8")
+post.prop.M8_white = matrix(c(sum(NIERhoM8_white>threshold), sum(NDERhoM8_white>threshold), sum(ATERhoM8_white>threshold))/n_MCMC,ncol=3)
+post.prop.M8_black = matrix(c(sum(NIERhoM8_black>threshold), sum(NDERhoM8_black>threshold), sum(ATERhoM8_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = -0.5")
+post.prop.M5_white = matrix(c(sum(NIERhoM5_white>threshold), sum(NDERhoM5_white>threshold), sum(ATERhoM5_white>threshold))/n_MCMC,ncol=3)
+post.prop.M5_black = matrix(c(sum(NIERhoM5_black>threshold), sum(NDERhoM5_black>threshold), sum(ATERhoM5_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = -0.3")
+post.prop.M3_white = matrix(c(sum(NIERhoM3_white>threshold), sum(NDERhoM3_white>threshold), sum(ATERhoM3_white>threshold))/n_MCMC,ncol=3)
+post.prop.M3_black = matrix(c(sum(NIERhoM3_black>threshold), sum(NDERhoM3_black>threshold), sum(ATERhoM3_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0")
+post.prop.0_white = matrix(c(sum(NIERho0_white>threshold), sum(NDERho0_white>threshold), sum(ATERho0_white>threshold))/n_MCMC,ncol=3)
+post.prop.0_black = matrix(c(sum(NIERho0_black>threshold), sum(NDERho0_black>threshold), sum(ATERho0_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0.3 (true)")
+post.prop.3_white = matrix(c(sum(NIERho03_white>threshold), sum(NDERho03_white>threshold), sum(ATERho03_white>threshold))/n_MCMC,ncol=3)
+post.prop.3_black = matrix(c(sum(NIERho03_black>threshold), sum(NDERho03_black>threshold), sum(ATERho03_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0.5")
+post.prop.5_white = matrix(c(sum(NIERho05_white>threshold), sum(NDERho05_white>threshold), sum(ATERho05_white>threshold))/n_MCMC,ncol=3)
+post.prop.5_black = matrix(c(sum(NIERho05_black>threshold), sum(NDERho05_black>threshold), sum(ATERho05_black>threshold))/n_MCMC,ncol=3)
+
+print("EDP with a post-treatment confounder & rho = 0.8")
+post.prop.8_white = matrix(c(sum(NIERho08_white>threshold), sum(NDERho08_white>threshold), sum(ATERho08_white>threshold))/n_MCMC,ncol=3)
+post.prop.8_black = matrix(c(sum(NIERho08_black>threshold), sum(NDERho08_black>threshold), sum(ATERho08_black>threshold))/n_MCMC,ncol=3)
+
+post.prop.cond = rbind(c(post.prop.Trim10_white, post.prop.Trim10_black),
+                       c(post.prop.Unifm10_white, post.prop.Unifm10_black),
+                       c(post.prop.Unifm11_white, post.prop.Unifm11_black),
+                       c(post.prop.Unif01_white, post.prop.Unif01_black),
+                       c(post.prop.Tri01_white, post.prop.Tri01_black),
+                       c(post.prop.M8_white, post.prop.M8_black),
+                       c(post.prop.M5_white, post.prop.M5_black),
+                       c(post.prop.M3_white, post.prop.M3_black),
+                       c(post.prop.0_white, post.prop.0_black),
+                       c(post.prop.3_white, post.prop.3_black),
+                       c(post.prop.5_white, post.prop.5_black),
+                       c(post.prop.8_white, post.prop.8_black))
+colnames(post.prop.cond) = c("NIE_w","NDE_w","ATE_w","NIE_b","NDE_b","ATE_b")
+rownames(post.prop.cond) = c("TriM10","UnifM10","UnifM11","Unif01","Tri01",
+                             "M8","M5","M3","0","3","5","8")
+post.prop.cond
+```
+
+
+
+
+

@@ -1,0 +1,2348 @@
+---
+title: "Rural LITE data: f(M)"
+output:
+  html_notebook: default
+---
+
+# DATA 
+```{r}
+# Load R packages
+library(Rcpp)
+library(RcppArmadillo)
+library(dplyr)
+library(mgcv)
+library(openxlsx) 
+library(lme4) 
+
+# Set Directory
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediationpost/RealDataAnalysis")
+# setwd("C:/Users/Jennifer/Desktop/EDPmediation/RealDataAnalysis")
+
+# -------------------------------------------------------------------------
+# ---------------------------------- DATA ---------------------------------
+# -------------------------------------------------------------------------
+# Here are the details for this analysis:
+# - outcome: 24 month weight change (spreadsheet 2)
+# - mediator - Phase 2 attendance (measured as a percentage) - spreadsheet 1
+# - baseline confounders - mostly Table 1 from the paper and previous spreadsheet I sent
+# - potential post treatment confounder - 6 month weight (or 6 month weight change) - spreadsheet 4
+# - ok to merge control/low and moderate/high arms (so only two arms)
+
+# Load Data
+data1 = read.xlsx('RL_WTS_24mo_MD.xlsx', sheet = 'wts24', startRow = 2)
+# data1$ID
+# data1$CONDITION
+# data1$TRTARM
+# data1$WTKG_24
+
+# no edu+income data here
+data2 = read.xlsx('final_baseline_data_RL.xlsx')
+# data2$ID
+# data2$CONDITION
+# data2$TRTARM
+# data2$sex
+# data2$race
+# data2$AGE_WK1
+# data2$HTSV1
+# data2$WTKG_SV2
+# data2$BMI_SV2
+
+data3 = read.xlsx('tx data att - 082413 - all summary vars.xlsx')
+# data3$ID
+# data3$CONDITION
+# data3$TRTARM
+# data3$p2_attmu_tot_pc
+
+# 
+data4 = read.xlsx('RLITE_LABS_WTS.xlsx', sheet = 'WTS_0')
+# data4$ID
+# data4$CONDITION
+# data4$TRTARM
+# data4$WTKG_0
+
+# 
+data5 = read.xlsx('RLITE_LABS_WTS.xlsx', sheet = 'WTS_6')
+# data5$ID
+# data5$CONDITION
+# data5$TRTARM
+# data5$WTKG_6
+
+# 
+data6 = read.xlsx('RLITE_LABS_WTS.xlsx', sheet = 'WTS_24')
+# data6$ID
+# data6$CONDITION
+# data6$TRTARM
+# data6$WTKG_24
+
+# - mediator - Phase 2 attendance (measured as a percentage) - spreadsheet 1
+# - baseline confounders - mostly Table 1 from the paper and previous spreadsheet I sent
+sum(abs(data2$ID!=data3$ID))
+sum(abs(data2$ID!=data4$ID))
+sum(abs(data2$ID!=data5$ID))
+sum(abs(data2$ID!=data6$ID))
+
+# we may add education and income 
+# Just ignore the warning message! 
+LITEdata = data.frame(id = data6$ID, 
+                      cond = data6$CONDITION,
+                      trt = as.numeric(data6$TRTARM),
+                      wgt24 = as.numeric(data6$WTKG_24), 
+                      wgt6 = as.numeric(data5$WTKG_6), 
+                      wgt0 = as.numeric(data4$WTKG_0),
+                      att = as.numeric(data3$p2_attmu_tot_pc), 
+                      sex = as.numeric(data2$sex), 
+                      race = ifelse(as.numeric(data2$nih_race_BIQ)==5,1,0), # white no not
+                      age = as.numeric(data2$AGE_WK1), 
+                      bmi = as.numeric(data2$BMI_SV2))
+
+# Drop variables with NAs
+N = nrow(LITEdata)
+sum(is.na(LITEdata$cond))
+sum(is.na(LITEdata$att))
+sum(is.na(LITEdata$sex))
+sum(is.na(LITEdata$age))
+sum(is.na(LITEdata$race))
+sum(is.na(LITEdata$bmi))
+sum(is.na(LITEdata$wgt0))
+sum(is.na(LITEdata$wgt6))
+sum(is.na(LITEdata$wgt24))
+
+# wgt6: 56 NAs (among N = 612)
+sum(is.na(LITEdata$wgt6))
+# wgt24: 121 NAs (among N = 612)
+sum(is.na(LITEdata$wgt24))
+# both NA: 37 NAs (among N = 612)
+sum(is.na(LITEdata$wgt6)*is.na(LITEdata$wgt24))
+# Total NA: 140 NAs (among N = 612)
+sum((is.na(LITEdata$wgt6) + is.na(LITEdata$wgt24))>=1)
+
+# Delete NAs -> No!
+# LITEdata = LITEdata[-which(apply(is.na(LITEdata), 1, sum)>0),]
+
+# Outcome: Weight change between wgt 0 and wgt 24
+LITEdata$wgtchange0_24 = LITEdata$wgt24 - LITEdata$wgt0
+# Post-treatment confounder: Weight change between wgt 0 and wgt 6
+LITEdata$wgtchange0_6 = LITEdata$wgt6 - LITEdata$wgt0
+# Post-treatment confounder: Weight change between wgt 0 and wgt 6
+LITEdata$trtmerge = ifelse(LITEdata$trt<2.5,0,1)
+
+{
+  esttype = "mean"
+  # esttype = "median"
+  save_cluster = TRUE
+  # save_cluster = FALSE
+  
+  # Extract ID for simulated dataset (specific to LSF computing cluster)
+  # Note: The LSB_JOBINDEX is specified in the bsub command using the -J
+  # option
+  run_ID = 1
+  
+  # Specify the seed so can repeat simulation later if necessary
+  set.seed(run_ID)
+  
+  # ------------------------------------------------------------------------------
+  # Define of constants (adjust to fit the data generating scenario) -------------
+  # ------------------------------------------------------------------------------
+  # Define number of observations per draw when using Monte Carlo integration to
+  # integrate out confounders
+  D = 1e4
+  
+  # Define number of Markov Chain Monte Carlo (MCMC) draws in Gibbs Sampler
+  # Define number of MCMC draws to 'burn' in Gibbs Sampler (check convergence)
+  # gibbs_iter = 1e5
+  # gibbs_burnin = 5e4
+  gibbs_iter = 5e3
+  gibbs_burnin = 5e3
+  
+  # the number of MC integration per iteration for a MCMC chain
+  # gibbs_thin = 10
+  gibbs_thin = 100
+  # gibbs_num = 2e3
+  # gibbs_thin = floor(gibbs_iter/gibbs_num)
+  
+  # Define number of Monte Carlo draws when using Monte Carlo integration to
+  # integrate out confounders
+  # num_MC = 1e4
+  # num_MC = 1e3
+  num_MC = 1e2
+  
+  # num_MC_prior
+  num_MC_prior = 1e5
+  
+  rho = "unif"
+  
+  # ------------------------------------------------------------------------------
+  # End Definition of Constants --------------------------------------------------
+  # ------------------------------------------------------------------------------
+}
+```
+
+### EDPM
+```{r}
+# -------------------------------------------------------------------------
+# ------------------ EDP with a post-treatment confounder -----------------
+# -------------------------------------------------------------------------
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediationpost/RealDataAnalysis")
+
+# EDPM
+Y = LITEdata$wgt24
+M = LITEdata$att
+V = LITEdata$wgt6
+Z = LITEdata$trtmerge
+C = cbind(LITEdata$sex,
+          LITEdata$race,
+          LITEdata$age,
+          LITEdata$bmi,
+          LITEdata$wgt0)
+```
+
+\newpage
+### dist. of (Y,M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+library(MASS)
+library(plotly)
+ind_naY = which(is.na(Y))
+x = M[-ind_naY]
+y = Y[-ind_naY]
+den3d = kde2d(x, y, n = 200)
+
+plot_ly(x=den3d$x, y=den3d$y, z=t(den3d$z)) %>% add_surface()
+
+plot(density(x))
+plot(density(y))
+```
+
+
+
+\newpage
+### EDPM (Y, M , Z, C)
+```{r}
+# -------------------------------------------------------------------------
+# ------------------ EDP with a post-treatment confounder -----------------
+# -------------------------------------------------------------------------
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediationpost/RealDataAnalysis")
+sourceCpp("EDPsource_cpp_realdata.cpp")
+source("EDPsource_r_realdata.R")
+
+{
+  # EDPM
+  Y = LITEdata$wgt24
+  M = LITEdata$att
+  V = LITEdata$wgt6
+  Z = LITEdata$trtmerge
+  C = cbind(LITEdata$sex,
+            LITEdata$race,
+            LITEdata$age,
+            LITEdata$bmi,
+            LITEdata$wgt0)
+  
+  MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                                gibbs_iter, gibbs_burnin, gibbs_thin,
+                                D, num_MC, num_MC_prior)
+  {
+    # Significance Level alpha
+    level = 0.05
+    quantile_alpha = c(level/2,1-level/2)
+  
+    # the number of Gibbs Sampler stored
+    n_MCMC = MCMCresult$constants$n_MCMC
+  
+    # Define interation check
+    iter_check = floor(n_MCMC/10)
+  
+    M0_mc = list(NA)
+    Mr_mc = list(NA)
+    M1_mc = list(NA)
+  
+    N = MCMCresult$constants$N
+    D = MCMCresult$constants$D
+    num_MC = MCMCresult$constants$num_MC
+    p_V = MCMCresult$constants$p_V
+    p_Z = MCMCresult$constants$p_Z
+    p_C1 = MCMCresult$constants$p_C1
+    p_C2 = MCMCresult$constants$p_C2
+  
+    f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+    f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+    YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+    MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+    Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+    VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+    Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+    a_Ysig2 = MCMCresult$priors$a_Ysig2
+    b_Ysig2 = MCMCresult$priors$b_Ysig2
+    a_Ybeta = MCMCresult$priors$a_Ybeta
+    B_Ybeta = MCMCresult$priors$B_Ybeta
+    a_Msig2 = MCMCresult$priors$a_Msig2
+    b_Msig2 = MCMCresult$priors$b_Msig2
+    a_Mbeta = MCMCresult$priors$a_Mbeta
+    B_Mbeta = MCMCresult$priors$B_Mbeta
+    a_Vsig2 = MCMCresult$priors$a_Vsig2
+    b_Vsig2 = MCMCresult$priors$b_Vsig2
+    a_Vbeta = MCMCresult$priors$a_Vbeta
+    B_Vbeta = MCMCresult$priors$B_Vbeta
+    a_pi   = MCMCresult$priors$a_pi
+    b_pi   = MCMCresult$priors$b_pi
+    a_mu   = MCMCresult$priors$a_mu
+    b_mu   = MCMCresult$priors$b_mu
+    a_tau2 = MCMCresult$priors$a_tau2
+    b_tau2 = MCMCresult$priors$b_tau2
+  
+    alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+    alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+    rho = runif(n_MCMC)
+  
+    # End initial values ------------------------------------------------------------
+    for (post_reps in 1:n_MCMC) {
+      Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+      Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+      n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+      n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+      max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+  
+      rho_mc = rho[post_reps] * rep(1,D)
+      YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+      Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+      MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+      Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+      VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+      Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+      ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+      XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+      XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+      Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+      alpha_theta = alpha_theta_draws[post_reps]
+      alpha_omega = alpha_omega_draws[post_reps]
+  
+      MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                  n_k, n_rk, Ky, Kyx, max_Kx_Sy,
+                                  D, num_MC, rho_mc,
+                                  YbetaPars, Ysig2Pars,
+                                  MbetaPars, Msig2Pars,
+                                  VbetaPars_array, Vsig2Pars_array,
+                                  ZpiPars_array, XpiPars_array,
+                                  XmuPars_array, Xtau2Pars_array,
+                                  alpha_theta, alpha_omega,
+                                  f0_z0_mc, f0_z1_mc,
+                                  YbetaPrior_mc,
+                                  MbetaPrior_mc, Msig2Prior_mc,
+                                  VbetaPrior_mc, Vsig2Prior_mc,
+                                  a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                  a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                  a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                  a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+  
+      M0_mc[[post_reps]] = MCresult$M0_mc
+      Mr_mc[[post_reps]] = MCresult$Mr_mc
+      M1_mc[[post_reps]] = MCresult$M1_mc
+  
+      if (post_reps %% iter_check == 0){
+        cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+      }
+    }
+  
+    distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+  }
+  
+  M0_mc = unlist(distM$M0_mc)
+  Mr_mc = unlist(distM$Mr_mc)
+  M1_mc = unlist(distM$M1_mc)
+  
+  mean(M)
+  mean(M[Z==0])
+  mean(M[Z==1])
+  
+  # n = MCMCresult$constants$D
+  n = 1e4
+  ylim_CE = c( 0.0, 2.0)
+  xlim_CE = c( min(M) - 1, max(M)+1)
+  
+  # print("dist. of M based on the data")
+  plot(density(M),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+  plot(density(M[Z==0]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+  plot(density(M[Z==1]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+  legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+         lty=rep(1,3), cex=1, text.font=4)
+  
+  # print("dist. of M based on the G-computation")
+  ylim_CE = c( 0.0, 2.0)
+  plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+  plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+  plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+  # abline(v = 0, col = "black", lwd = 2)
+  # abline(v = 1, col = "black", lwd = 2)
+  legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+         lty=rep(1,3), cex=1, text.font=4)
+  
+  # print("histogram of M based on the G-computation")
+  ylim_CE = c( 0.0, 80)
+  hist(M,20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+  hist(M[Z==0],20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+  hist(M[Z==1],20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+  
+  # print("histogram of M based on the G-computation")
+  ylim_CE = c( 0.0, 8000)
+  hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+  hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+  hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+  
+  # Define design matrix
+  p_C = ncol(C)
+  p_C1 = sum(apply(C, 2, function(x) { all(x %in% 0:1) }))
+  p_C2 = p_C - p_C1
+  if (p_C1>0 && p_C2>0){
+    C1 = C[,1:p_C1]
+    C2 = C[,(p_C1+1):(p_C1+p_C2)]
+    scaC2 = apply(C2, 2, scale)
+    scaC = cbind(C1, scaC2)
+  } else if (p_C2>0){
+    scaC = apply(C, 2, scale)
+  } else {
+    scaC = C
+  }
+  X = cbind(Z, scaC)
+  matX = cbind(1, X)
+  matV = cbind(1, Z, V, scaC)
+}
+apply(matV[-which(is.na(V)),] %*% MCMCresult$MCMCposteriors$MbetaLists[[post_reps]], 2, mean)
+apply(matV[-which(is.na(V)),] %*% MCMCresult$MCMCposteriors$MbetaLists[[post_reps]], 2, median)
+n_rk
+# MCMCresult$MCMCposteriors$n_rk
+```
+
+\newpage
+### EDPM (Y, M , Z, C)
+```{r}
+# -------------------------------------------------------------------------
+# ------------------ EDP with a post-treatment confounder -----------------
+# -------------------------------------------------------------------------
+setwd("C:/Users/WooJung/Documents/Rproject/EDPmediationpost/RealDataAnalysis")
+sourceCpp("EDPsource_cpp_realdata.cpp")
+source("EDPsource_r_realdata.R")
+
+# EDPM
+Y = LITEdata$wgt24
+M = LITEdata$att
+V = LITEdata$wgt6
+Z = LITEdata$trtmerge
+C = cbind(LITEdata$sex,
+          LITEdata$race,
+          LITEdata$age,
+          LITEdata$bmi,
+          LITEdata$wgt0)
+
+eps = - 0.1
+newM = M * (1 + 2 * eps) / 2 + 0.5
+newM = log(newM/(1-newM))
+
+# a = (((invlogit(newM) - 0.5) * 2 / (1 + 2 * eps))^{3})/2 + 0.5
+# a - M
+
+hist(M)
+plot(density(M))
+hist(newM)
+plot(density(newM))
+
+M = newM
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+
+  rho = runif(n_MCMC)
+
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy,
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array,
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega,
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc,
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e4
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c( min(M) - 1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)]),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+# abline(v = 0, col = "black", lwd = 2)
+# abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 50)
+hist(M,20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],20,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# Define design matrix
+p_C = ncol(C)
+p_C1 = sum(apply(C, 2, function(x) { all(x %in% 0:1) }))
+p_C2 = p_C - p_C1
+if (p_C1>0 && p_C2>0){
+  C1 = C[,1:p_C1]
+  C2 = C[,(p_C1+1):(p_C1+p_C2)]
+  scaC2 = apply(C2, 2, scale)
+  scaC = cbind(C1, scaC2)
+} else if (p_C2>0){
+  scaC = apply(C, 2, scale)
+} else {
+  scaC = C
+}
+X = cbind(Z, scaC)
+matX = cbind(1, X)
+matV = cbind(1, Z, V, scaC)
+apply(matV[-which(is.na(V)),] %*% MCMCresult$MCMCposteriors$MbetaLists[[post_reps]], 2, mean)
+apply(matV[-which(is.na(V)),] %*% MCMCresult$MCMCposteriors$MbetaLists[[post_reps]], 2, median)
+n_rk
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+\newpage
+### dist. of f(M) = M
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M) = scale(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+M = as.numeric(scale(M))
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M) = exp(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+M = exp(M)
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M) = log(1+M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+M = log(1+M)
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M) = invlogit(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+M = as.numeric(scale(M))
+M = exp(M)
+M = log(1+M)
+M = invlogit(M)
+
+eps = 0.1
+M = (M*(diff(range(M))-2*eps))+eps
+
+eps = 0.1
+M = (M*(diff(range(M))-2*eps))+eps
+M = log(M/(1-M))
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+eps = 0.1
+M = (M*(diff(range(M))-2*eps))+eps
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+eps = 0.1
+M = (M*(diff(range(M))-2*eps))+eps
+M = log(M/(1-M))
+
+MCMCresult = EDPmediationMCMC(Y, M, V, Z, C,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+YY = c(Y,Y+rnorm(N,0,0.1))
+MM = c(M,M)
+VV = c(V,V+rnorm(N,0,0.1))
+ZZ = c(Z,Z)
+
+p_C = ncol(C)
+p_C1 = sum(apply(C, 2, function(x) { all(x %in% 0:1) }))
+p_C2 = p_C - p_C1
+AA = rbind(C,C)
+AA[(N+1):(2*N),((p_C1+1):p_C)] = AA[(N+1):(2*N),((p_C1+1):p_C)] + matrix(rnorm(p_C2*N,0,0.1),ncol=p_C2)
+CC = AA
+
+MCMCresult = EDPmediationMCMC(YY, MM, VV, ZZ, CC,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
+
+\newpage
+### dist. of f(M)
+```{r}
+set.seed(1)
+M = LITEdata$att
+
+YY = c(Y,Y+rnorm(N,0,0.1),Y+rnorm(N,0,0.1),Y+rnorm(N,0,0.1))
+MM = c(M,M,M,M)
+VV = c(V,V+rnorm(N,0,0.1),V+rnorm(N,0,0.1),V+rnorm(N,0,0.1))
+ZZ = c(Z,Z,Z,Z)
+
+p_C = ncol(C)
+p_C1 = sum(apply(C, 2, function(x) { all(x %in% 0:1) }))
+p_C2 = p_C - p_C1
+AA = rbind(C,C,C,C)
+AA[(N+1):(4*N),((p_C1+1):p_C)] = AA[(N+1):(4*N),((p_C1+1):p_C)] + matrix(rnorm((p_C2*3*N),0,0.1),ncol=p_C2)
+CC = AA
+
+MCMCresult = EDPmediationMCMC(YY, MM, VV, ZZ, CC,
+                              gibbs_iter, gibbs_burnin, gibbs_thin,
+                              D, num_MC, num_MC_prior)
+
+{
+  # Significance Level alpha
+  level = 0.05
+  quantile_alpha = c(level/2,1-level/2)
+  
+  # the number of Gibbs Sampler stored
+  n_MCMC = MCMCresult$constants$n_MCMC
+  
+  # Define interation check
+  iter_check = floor(n_MCMC/10)
+  
+  M0_mc = list(NA)
+  Mr_mc = list(NA)
+  M1_mc = list(NA)
+  
+  N = MCMCresult$constants$N
+  D = MCMCresult$constants$D
+  num_MC = MCMCresult$constants$num_MC
+  p_V = MCMCresult$constants$p_V
+  p_Z = MCMCresult$constants$p_Z
+  p_C1 = MCMCresult$constants$p_C1
+  p_C2 = MCMCresult$constants$p_C2
+  
+  f0_z0_mc = MCMCresult$MCpriors$f0_z0_mc
+  f0_z1_mc = MCMCresult$MCpriors$f0_z1_mc
+  YbetaPrior_mc = MCMCresult$MCpriors$YbetaPrior_mc
+  MbetaPrior_mc = MCMCresult$MCpriors$MbetaPrior_mc
+  Msig2Prior_mc = MCMCresult$MCpriors$Msig2Prior_mc
+  VbetaPrior_mc = MCMCresult$MCpriors$VbetaPrior_mc
+  Vsig2Prior_mc = MCMCresult$MCpriors$Vsig2Prior_mc
+  
+  a_Ysig2 = MCMCresult$priors$a_Ysig2
+  b_Ysig2 = MCMCresult$priors$b_Ysig2
+  a_Ybeta = MCMCresult$priors$a_Ybeta
+  B_Ybeta = MCMCresult$priors$B_Ybeta
+  a_Msig2 = MCMCresult$priors$a_Msig2
+  b_Msig2 = MCMCresult$priors$b_Msig2
+  a_Mbeta = MCMCresult$priors$a_Mbeta
+  B_Mbeta = MCMCresult$priors$B_Mbeta
+  a_Vsig2 = MCMCresult$priors$a_Vsig2
+  b_Vsig2 = MCMCresult$priors$b_Vsig2
+  a_Vbeta = MCMCresult$priors$a_Vbeta
+  B_Vbeta = MCMCresult$priors$B_Vbeta
+  a_pi   = MCMCresult$priors$a_pi
+  b_pi   = MCMCresult$priors$b_pi
+  a_mu   = MCMCresult$priors$a_mu
+  b_mu   = MCMCresult$priors$b_mu
+  a_tau2 = MCMCresult$priors$a_tau2
+  b_tau2 = MCMCresult$priors$b_tau2
+  
+  alpha_theta_draws = MCMCresult$MCMCposteriors$alpha_theta_draws
+  alpha_omega_draws = MCMCresult$MCMCposteriors$alpha_omega_draws
+  
+  rho = runif(n_MCMC)
+  
+  # End initial values ------------------------------------------------------------
+  for (post_reps in 1:n_MCMC) {
+    Ky = MCMCresult$MCMCposteriors$KyLists[[post_reps]]
+    Kyx = MCMCresult$MCMCposteriors$KyxLists[[post_reps]]
+    n_k = MCMCresult$MCMCposteriors$n_kLists[[post_reps]]
+    n_rk = MCMCresult$MCMCposteriors$n_rkLists[[post_reps]]
+    max_Kx_Sy = MCMCresult$MCMCposteriors$max_Kx_SyLists[[post_reps]]
+    
+    rho_mc = rho[post_reps] * rep(1,D)
+    YbetaPars = MCMCresult$MCMCposteriors$YbetaLists[[post_reps]]
+    Ysig2Pars = MCMCresult$MCMCposteriors$Ysig2Lists[[post_reps]]
+    MbetaPars = MCMCresult$MCMCposteriors$MbetaLists[[post_reps]]
+    Msig2Pars = MCMCresult$MCMCposteriors$Msig2Lists[[post_reps]]
+    VbetaPars_array = MCMCresult$MCMCposteriors$VbetaLists[[post_reps]]
+    Vsig2Pars_array = MCMCresult$MCMCposteriors$Vsig2Lists[[post_reps]]
+    ZpiPars_array   = MCMCresult$MCMCposteriors$ZpiLists[[post_reps]]
+    XpiPars_array   = MCMCresult$MCMCposteriors$XpiLists[[post_reps]]
+    XmuPars_array   = MCMCresult$MCMCposteriors$XmuLists[[post_reps]]
+    Xtau2Pars_array = MCMCresult$MCMCposteriors$Xtau2Lists[[post_reps]]
+    alpha_theta = alpha_theta_draws[post_reps]
+    alpha_omega = alpha_omega_draws[post_reps]
+    
+    MCresult = EDPpostmc_concon(p_C1, p_C2,
+                                n_k, n_rk, Ky, Kyx, max_Kx_Sy, 
+                                D, num_MC, rho_mc,
+                                YbetaPars, Ysig2Pars,
+                                MbetaPars, Msig2Pars,
+                                VbetaPars_array, Vsig2Pars_array,
+                                ZpiPars_array, XpiPars_array, 
+                                XmuPars_array, Xtau2Pars_array,
+                                alpha_theta, alpha_omega, 
+                                f0_z0_mc, f0_z1_mc,
+                                YbetaPrior_mc, 
+                                MbetaPrior_mc, Msig2Prior_mc,
+                                VbetaPrior_mc, Vsig2Prior_mc,
+                                a_Ysig2, b_Ysig2, a_Ybeta, B_Ybeta,
+                                a_Msig2, b_Msig2, a_Mbeta, B_Mbeta,
+                                a_Vsig2, b_Vsig2, a_Vbeta, B_Vbeta,
+                                a_pi, b_pi, a_mu, b_mu, a_tau2, b_tau2)
+    
+    M0_mc[[post_reps]] = MCresult$M0_mc
+    Mr_mc[[post_reps]] = MCresult$Mr_mc
+    M1_mc[[post_reps]] = MCresult$M1_mc
+    
+    if (post_reps %% iter_check == 0){
+      cat("Post-Processing",post_reps,"(",(post_reps/n_MCMC)*100,"%)","Time:",date(),"\n")
+    }
+  }
+  
+  distM = list(M0_mc = M0_mc, Mr_mc = Mr_mc, M1_mc = M1_mc)
+}
+
+M0_mc = unlist(distM$M0_mc)
+Mr_mc = unlist(distM$Mr_mc)
+M1_mc = unlist(distM$M1_mc)
+
+mean(M)
+mean(M[Z==0])
+mean(M[Z==1])
+
+# n = MCMCresult$constants$D
+n = 1e5
+ylim_CE = c( 0.0, 2.0)
+xlim_CE = c(min(M)-1, max(M)+1)
+
+# print("dist. of M based on the data")
+plot(density(M,n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(M[Z==0],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M[Z==1],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Data",col="green")
+legend("topright", legend=c("M", "M[Z==0]", "M[Z==1]"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("dist. of M based on the G-computation")
+ylim_CE = c( 0.0, 2.0)
+plot(density(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="red");par(new=T)
+plot(density(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="",col="blue");par(new=T)
+plot(density(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],n=n),xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="G-computation",col="green")
+abline(v = 0, col = "black", lwd = 2)
+abline(v = 1, col = "black", lwd = 2)
+legend("topright", legend=c("M0", "Mr", "M1"), col=c("red", "blue", "green"), 
+       lty=rep(1,3), cex=1, text.font=4)
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 100)
+hist(M,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M: data")
+hist(M[Z==0],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==0]: data")
+hist(M[Z==1],xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M[Z==1]: data")
+
+# print("histogram of M based on the G-computation")
+ylim_CE = c( 0.0, 350)
+hist(M0_mc[which((M0_mc>xlim_CE[1])*(M0_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M0: G-computation")
+hist(Mr_mc[which((Mr_mc>xlim_CE[1])*(Mr_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="Mr: G-computation")
+hist(M1_mc[which((M1_mc>xlim_CE[1])*(M1_mc<xlim_CE[2])==1)],1e3,xlim=xlim_CE,ylim=ylim_CE,xlab="",ylab="",main="M1: G-computation")
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+rho = "unif"
+POSTresultRhoUnif = EDPmediationPOST(MCMCresult, esttype, rho, save_cluster)
+
+NIE_tableRhoUnif = POSTresultRhoUnif$NIE_result_mc
+NDE_tableRhoUnif = POSTresultRhoUnif$NDE_result_mc
+ATE_tableRhoUnif = POSTresultRhoUnif$ATE_result_mc
+
+CE_tableRhoUnif = rbind(NIE_tableRhoUnif,NDE_tableRhoUnif,ATE_tableRhoUnif)
+rownames(CE_tableRhoUnif) = c("NIE","NDE","ATE")
+
+NIErhoUnif = POSTresultRhoUnif$NIE
+NDErhoUnif = POSTresultRhoUnif$NDE
+ATErhoUnif = POSTresultRhoUnif$ATE
+
+q95 = quantile(c(NIErhoUnif,NDErhoUnif,ATErhoUnif),c(0.025, 0.975))
+ylim_CE=c(floor(min(q95)),ceiling(max(c(q95))))
+plot(sort(NIErhoUnif),col="red",ylim=ylim_CE);par(new=T)
+plot(sort(NDErhoUnif),col="blue",ylim=ylim_CE);par(new=T)
+plot(sort(ATErhoUnif),col="green",ylim=ylim_CE)
+CE_tableRhoUnif
+
+```
