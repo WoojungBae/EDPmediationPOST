@@ -1,0 +1,135 @@
+Thu Oct 12 18:31:37 EDT 2023
+c0704a-s8.ufhpc
+/home/woojung.bae/EDPmediation
+Bur-In End 50000 Time: Thu Oct 12 18:35:36 2023 
+Gibbs Iteration 2500 ( 5 %) Time: Thu Oct 12 18:35:46 2023 
+Gibbs Iteration 5000 ( 10 %) Time: Thu Oct 12 18:35:55 2023 
+Gibbs Iteration 7500 ( 15 %) Time: Thu Oct 12 18:36:05 2023 
+Gibbs Iteration 10000 ( 20 %) Time: Thu Oct 12 18:36:15 2023 
+Gibbs Iteration 12500 ( 25 %) Time: Thu Oct 12 18:36:25 2023 
+Gibbs Iteration 15000 ( 30 %) Time: Thu Oct 12 18:36:34 2023 
+Gibbs Iteration 17500 ( 35 %) Time: Thu Oct 12 18:36:44 2023 
+Gibbs Iteration 20000 ( 40 %) Time: Thu Oct 12 18:36:54 2023 
+Gibbs Iteration 22500 ( 45 %) Time: Thu Oct 12 18:37:04 2023 
+Gibbs Iteration 25000 ( 50 %) Time: Thu Oct 12 18:37:13 2023 
+Gibbs Iteration 27500 ( 55 %) Time: Thu Oct 12 18:37:23 2023 
+Gibbs Iteration 30000 ( 60 %) Time: Thu Oct 12 18:37:33 2023 
+Gibbs Iteration 32500 ( 65 %) Time: Thu Oct 12 18:37:42 2023 
+Gibbs Iteration 35000 ( 70 %) Time: Thu Oct 12 18:37:52 2023 
+Gibbs Iteration 37500 ( 75 %) Time: Thu Oct 12 18:38:02 2023 
+Gibbs Iteration 40000 ( 80 %) Time: Thu Oct 12 18:38:12 2023 
+Gibbs Iteration 42500 ( 85 %) Time: Thu Oct 12 18:38:22 2023 
+Gibbs Iteration 45000 ( 90 %) Time: Thu Oct 12 18:38:31 2023 
+Gibbs Iteration 47500 ( 95 %) Time: Thu Oct 12 18:38:41 2023 
+Gibbs Iteration 50000 ( 100 %) Time: Thu Oct 12 18:38:51 2023 
+Post-Processing 50 ( 10 %) Time: Thu Oct 12 18:38:52 2023 
+Post-Processing 100 ( 20 %) Time: Thu Oct 12 18:38:53 2023 
+Post-Processing 150 ( 30 %) Time: Thu Oct 12 18:38:54 2023 
+Post-Processing 200 ( 40 %) Time: Thu Oct 12 18:38:55 2023 
+Post-Processing 250 ( 50 %) Time: Thu Oct 12 18:38:56 2023 
+Post-Processing 300 ( 60 %) Time: Thu Oct 12 18:38:57 2023 
+Post-Processing 350 ( 70 %) Time: Thu Oct 12 18:38:58 2023 
+Post-Processing 400 ( 80 %) Time: Thu Oct 12 18:38:59 2023 
+Post-Processing 450 ( 90 %) Time: Thu Oct 12 18:39:00 2023 
+Post-Processing 500 ( 100 %) Time: Thu Oct 12 18:39:01 2023 
+   user  system elapsed 
+400.751   0.053 404.938 
+Bur-In End 50000 Time: Thu Oct 12 18:47:56 2023 
+Gibbs Iteration 1000 ( 5 %) Time: Thu Oct 12 18:48:07 2023 
+Gibbs Iteration 2000 ( 10 %) Time: Thu Oct 12 18:48:17 2023 
+Gibbs Iteration 3000 ( 15 %) Time: Thu Oct 12 18:48:27 2023 
+Gibbs Iteration 4000 ( 20 %) Time: Thu Oct 12 18:48:37 2023 
+Gibbs Iteration 5000 ( 25 %) Time: Thu Oct 12 18:48:47 2023 
+Gibbs Iteration 6000 ( 30 %) Time: Thu Oct 12 18:48:57 2023 
+Gibbs Iteration 7000 ( 35 %) Time: Thu Oct 12 18:49:07 2023 
+Gibbs Iteration 8000 ( 40 %) Time: Thu Oct 12 18:49:18 2023 
+Gibbs Iteration 9000 ( 45 %) Time: Thu Oct 12 18:49:28 2023 
+Gibbs Iteration 10000 ( 50 %) Time: Thu Oct 12 18:49:38 2023 
+Gibbs Iteration 11000 ( 55 %) Time: Thu Oct 12 18:49:48 2023 
+Gibbs Iteration 12000 ( 60 %) Time: Thu Oct 12 18:49:58 2023 
+Gibbs Iteration 13000 ( 65 %) Time: Thu Oct 12 18:50:09 2023 
+Gibbs Iteration 14000 ( 70 %) Time: Thu Oct 12 18:50:19 2023 
+Gibbs Iteration 15000 ( 75 %) Time: Thu Oct 12 18:50:29 2023 
+Gibbs Iteration 16000 ( 80 %) Time: Thu Oct 12 18:50:39 2023 
+Gibbs Iteration 17000 ( 85 %) Time: Thu Oct 12 18:50:49 2023 
+Gibbs Iteration 18000 ( 90 %) Time: Thu Oct 12 18:50:59 2023 
+Gibbs Iteration 19000 ( 95 %) Time: Thu Oct 12 18:51:09 2023 
+Gibbs Iteration 20000 ( 100 %) Time: Thu Oct 12 18:51:20 2023 
+Post-Processing 20 ( 10 %) Time: Thu Oct 12 18:51:20 2023 
+Post-Processing 40 ( 20 %) Time: Thu Oct 12 18:51:20 2023 
+Post-Processing 60 ( 30 %) Time: Thu Oct 12 18:51:21 2023 
+Post-Processing 80 ( 40 %) Time: Thu Oct 12 18:51:21 2023 
+Post-Processing 100 ( 50 %) Time: Thu Oct 12 18:51:21 2023 
+Post-Processing 120 ( 60 %) Time: Thu Oct 12 18:51:22 2023 
+Post-Processing 140 ( 70 %) Time: Thu Oct 12 18:51:22 2023 
+Post-Processing 160 ( 80 %) Time: Thu Oct 12 18:51:23 2023 
+Post-Processing 180 ( 90 %) Time: Thu Oct 12 18:51:23 2023 
+Post-Processing 200 ( 100 %) Time: Thu Oct 12 18:51:23 2023 
+   user  system elapsed 
+735.384   0.062 742.484 
+Bur-In End 20000 Time: Thu Oct 12 19:02:46 2023 
+Gibbs Iteration 1000 ( 5 %) Time: Thu Oct 12 19:03:19 2023 
+Gibbs Iteration 2000 ( 10 %) Time: Thu Oct 12 19:03:53 2023 
+Gibbs Iteration 3000 ( 15 %) Time: Thu Oct 12 19:04:26 2023 
+Gibbs Iteration 4000 ( 20 %) Time: Thu Oct 12 19:04:58 2023 
+Gibbs Iteration 5000 ( 25 %) Time: Thu Oct 12 19:05:29 2023 
+Gibbs Iteration 6000 ( 30 %) Time: Thu Oct 12 19:06:01 2023 
+Gibbs Iteration 7000 ( 35 %) Time: Thu Oct 12 19:06:33 2023 
+Gibbs Iteration 8000 ( 40 %) Time: Thu Oct 12 19:07:05 2023 
+Gibbs Iteration 9000 ( 45 %) Time: Thu Oct 12 19:07:37 2023 
+Gibbs Iteration 10000 ( 50 %) Time: Thu Oct 12 19:08:10 2023 
+Gibbs Iteration 11000 ( 55 %) Time: Thu Oct 12 19:08:42 2023 
+Gibbs Iteration 12000 ( 60 %) Time: Thu Oct 12 19:09:15 2023 
+Gibbs Iteration 13000 ( 65 %) Time: Thu Oct 12 19:09:48 2023 
+Gibbs Iteration 14000 ( 70 %) Time: Thu Oct 12 19:10:21 2023 
+Gibbs Iteration 15000 ( 75 %) Time: Thu Oct 12 19:10:54 2023 
+Gibbs Iteration 16000 ( 80 %) Time: Thu Oct 12 19:11:27 2023 
+Gibbs Iteration 17000 ( 85 %) Time: Thu Oct 12 19:12:00 2023 
+Gibbs Iteration 18000 ( 90 %) Time: Thu Oct 12 19:12:33 2023 
+Gibbs Iteration 19000 ( 95 %) Time: Thu Oct 12 19:13:07 2023 
+Gibbs Iteration 20000 ( 100 %) Time: Thu Oct 12 19:13:41 2023 
+Post-Processing 20 ( 10 %) Time: Thu Oct 12 19:13:41 2023 
+Post-Processing 40 ( 20 %) Time: Thu Oct 12 19:13:41 2023 
+Post-Processing 60 ( 30 %) Time: Thu Oct 12 19:13:42 2023 
+Post-Processing 80 ( 40 %) Time: Thu Oct 12 19:13:42 2023 
+Post-Processing 100 ( 50 %) Time: Thu Oct 12 19:13:42 2023 
+Post-Processing 120 ( 60 %) Time: Thu Oct 12 19:13:43 2023 
+Post-Processing 140 ( 70 %) Time: Thu Oct 12 19:13:43 2023 
+Post-Processing 160 ( 80 %) Time: Thu Oct 12 19:13:44 2023 
+Post-Processing 180 ( 90 %) Time: Thu Oct 12 19:13:44 2023 
+Post-Processing 200 ( 100 %) Time: Thu Oct 12 19:13:44 2023 
+    user   system  elapsed 
+1329.061    0.135 1340.957 
+Bur-In End 20000 Time: Thu Oct 12 21:06:22 2023 
+Gibbs Iteration 1000 ( 5 %) Time: Thu Oct 12 21:11:50 2023 
+Gibbs Iteration 2000 ( 10 %) Time: Thu Oct 12 21:17:10 2023 
+Gibbs Iteration 3000 ( 15 %) Time: Thu Oct 12 21:22:22 2023 
+Gibbs Iteration 4000 ( 20 %) Time: Thu Oct 12 21:27:43 2023 
+Gibbs Iteration 5000 ( 25 %) Time: Thu Oct 12 21:33:03 2023 
+Gibbs Iteration 6000 ( 30 %) Time: Thu Oct 12 21:38:35 2023 
+Gibbs Iteration 7000 ( 35 %) Time: Thu Oct 12 21:44:11 2023 
+Gibbs Iteration 8000 ( 40 %) Time: Thu Oct 12 21:49:45 2023 
+Gibbs Iteration 9000 ( 45 %) Time: Thu Oct 12 21:55:21 2023 
+Gibbs Iteration 10000 ( 50 %) Time: Thu Oct 12 22:00:58 2023 
+Gibbs Iteration 11000 ( 55 %) Time: Thu Oct 12 22:06:24 2023 
+Gibbs Iteration 12000 ( 60 %) Time: Thu Oct 12 22:11:57 2023 
+Gibbs Iteration 13000 ( 65 %) Time: Thu Oct 12 22:17:33 2023 
+Gibbs Iteration 14000 ( 70 %) Time: Thu Oct 12 22:22:59 2023 
+Gibbs Iteration 15000 ( 75 %) Time: Thu Oct 12 22:28:33 2023 
+Gibbs Iteration 16000 ( 80 %) Time: Thu Oct 12 22:34:10 2023 
+Gibbs Iteration 17000 ( 85 %) Time: Thu Oct 12 22:39:51 2023 
+Gibbs Iteration 18000 ( 90 %) Time: Thu Oct 12 22:45:43 2023 
+Gibbs Iteration 19000 ( 95 %) Time: Thu Oct 12 22:51:29 2023 
+Gibbs Iteration 20000 ( 100 %) Time: Thu Oct 12 22:57:07 2023 
+Post-Processing 20 ( 10 %) Time: Thu Oct 12 22:57:07 2023 
+Post-Processing 40 ( 20 %) Time: Thu Oct 12 22:57:08 2023 
+Post-Processing 60 ( 30 %) Time: Thu Oct 12 22:57:08 2023 
+Post-Processing 80 ( 40 %) Time: Thu Oct 12 22:57:08 2023 
+Post-Processing 100 ( 50 %) Time: Thu Oct 12 22:57:09 2023 
+Post-Processing 120 ( 60 %) Time: Thu Oct 12 22:57:09 2023 
+Post-Processing 140 ( 70 %) Time: Thu Oct 12 22:57:10 2023 
+Post-Processing 160 ( 80 %) Time: Thu Oct 12 22:57:10 2023 
+Post-Processing 180 ( 90 %) Time: Thu Oct 12 22:57:10 2023 
+Post-Processing 200 ( 100 %) Time: Thu Oct 12 22:57:11 2023 
+     user    system   elapsed 
+13289.085     0.083 13406.361 
