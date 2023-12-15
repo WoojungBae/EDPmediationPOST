@@ -1,14 +1,17 @@
 .DS_Store
 .Rproj.user
 .Rhistory
-.RData
 .Ruserdata
 
 .Rbuildignore
+*.RData
 *.Rproj
 *.o
 *.so
 *.dll
+
+*.zip
+*.eps
 
 source/OLD
 RealDataAnalysis/DATA
