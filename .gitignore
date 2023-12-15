@@ -1,0 +1,16 @@
+*.DS_Store
+*.Rbuildignore
+*.Rproj
+*.Rproj.user
+*.Rhistory
+*.RData
+*.Ruserdata
+*.DS_Store
+
+*.o
+*.so
+*.dll
+
+source/OLD
+RealDataAnalysis/DATA
+SimulationStudy/Semiparametric
